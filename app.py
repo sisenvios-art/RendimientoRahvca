@@ -1,18 +1,10 @@
 """
 Dashboard Rendimiento Hora Médico - H. II Huancavelica 2026
 ============================================================
-Cálculo : ATE / HRAS_PROG
-Estándar: 5 atenciones/hora
+Cálculo : ATE / HRAS_PROG  |  Estándar: 5 atenciones/hora
 Semáforo: Verde >= 5 | Amarillo 4.5-4.99 | Rojo < 4.5
 
-Despliegue en Streamlit Community Cloud (gratis):
-  1. Sube este archivo y requirements.txt a un repo de GitHub
-  2. Ve a https://share.streamlit.io → "New app" → apunta al repo
-  3. Listo — la URL pública queda disponible al instante
-
-Uso local:
-  pip install -r requirements.txt
-  streamlit run app.py
+Los archivos TXT deben estar en la carpeta /data del repositorio.
 """
 
 import io
@@ -26,7 +18,19 @@ import streamlit as st
 
 # ── CONFIGURACIÓN ──────────────────────────────────────────────────────────────
 
-MESES_ORDER    = ["Enero", "Febrero", "Marzo", "Abril", "Mayo"]
+# Carpeta con los archivos TXT dentro del repo
+DATA_DIR = Path(__file__).parent / "data"
+
+# Mapeo mes -> archivo (ajusta nombres si cambian)
+ARCHIVOS = {
+    "Enero":   "342_20260101_20260131_HrasEfectivas.txt",
+    "Febrero": "342_20260201_20260228_HrasEfectivas.txt",
+    "Marzo":   "342_20260301_20260331_HrasEfectivas.txt",
+    "Abril":   "342_20260401_20260430_HrasEfectivas.txt",
+    "Mayo":    "342_20260501_20260531_HrasEfectivas.txt",
+}
+
+MESES_ORDER    = list(ARCHIVOS.keys())
 GRUPO          = "MEDICO"
 SUBACTIVIDADES = ["CONSULTA MEDICA", "ATENCION ADULTO MAYOR FRAGIL"]
 ESTANDAR       = 5.0
@@ -45,26 +49,25 @@ def semaforo(val):
     return "Bajo estándar"
 
 def color_semaforo(val):
-    s = semaforo(val)
     return {
         "Óptimo":        COLOR_VERDE,
         "En riesgo":     COLOR_AMARILLO,
         "Bajo estándar": COLOR_ROJO,
         "Sin dato":      COLOR_ND,
-    }[s]
-
-def estilo_celda(val):
-    c = color_semaforo(val)
-    return f"background-color:{c};color:{'white' if c == COLOR_ROJO else 'black'};font-weight:bold;text-align:center"
+    }[semaforo(val)]
 
 @st.cache_data
-def cargar_datos(archivos_subidos):
+def cargar_datos() -> pd.DataFrame:
     frames = []
-    for archivo in archivos_subidos:
-        mes = detectar_mes(archivo.name)
-        df  = pd.read_csv(archivo, sep="|", low_memory=False)
+    for mes, archivo in ARCHIVOS.items():
+        ruta = DATA_DIR / archivo
+        if not ruta.exists():
+            st.warning(f"Archivo no encontrado: {archivo}")
+            continue
+        df = pd.read_csv(ruta, sep="|", low_memory=False)
         df["MES"] = mes
         frames.append(df)
+
     if not frames:
         return pd.DataFrame()
 
@@ -80,8 +83,8 @@ def cargar_datos(archivos_subidos):
     grp = datos.groupby(
         ["MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD"], as_index=False
     ).agg(
-        ATENCIONES =("ATE",       "sum"),
-        HORAS_PROG =("HRAS_PROG", "sum"),
+        ATENCIONES=("ATE",       "sum"),
+        HORAS_PROG=("HRAS_PROG", "sum"),
     )
     grp["MES"] = pd.Categorical(grp["MES"], categories=MESES_ORDER, ordered=True)
     grp.sort_values(["MES", "SERVICIO", "PROFESIONAL"], inplace=True)
@@ -93,24 +96,6 @@ def cargar_datos(archivos_subidos):
     grp["SEMAFORO"] = grp["RENDIMIENTO"].apply(semaforo)
     grp["COLOR"]    = grp["RENDIMIENTO"].apply(color_semaforo)
     return grp
-
-def detectar_mes(nombre_archivo: str) -> str:
-    """Extrae el mes desde el nombre del archivo (YYYYMMDD) o lo pide al usuario."""
-    name = nombre_archivo.upper()
-    mapa = {
-        "0101": "Enero",   "0201": "Febrero", "0301": "Marzo",
-        "0401": "Abril",   "0501": "Mayo",    "0601": "Junio",
-        "0701": "Julio",   "0801": "Agosto",  "0901": "Setiembre",
-        "1001": "Octubre", "1101": "Noviembre","1201": "Diciembre",
-    }
-    for patron, mes in mapa.items():
-        if patron in name:
-            return mes
-    # fallback: busca mes en el nombre
-    for mes in MESES_ORDER:
-        if mes.upper() in name:
-            return mes
-    return "Desconocido"
 
 def exportar_excel(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
@@ -130,7 +115,6 @@ def exportar_excel(df: pd.DataFrame) -> bytes:
             ws.write(row_num, col_rend, val, fmt)
     return buf.getvalue()
 
-
 # ── LAYOUT ─────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -142,36 +126,15 @@ st.set_page_config(
 st.title("🏥 Rendimiento Hora Médico")
 st.caption("H. II Huancavelica 2026 · Grupo Ocupacional: MÉDICO · Estándar: 5 atenc/hora · Cálculo: ATE ÷ HRAS_PROG")
 
-# ── CARGA DE ARCHIVOS ──────────────────────────────────────────────────────────
+# ── CARGA ──────────────────────────────────────────────────────────────────────
 
-with st.sidebar:
-    st.header("📂 Cargar archivos")
-    archivos = st.file_uploader(
-        "Sube los archivos TXT (separados por |)",
-        type=["txt", "csv"],
-        accept_multiple_files=True,
-    )
-    st.markdown("---")
-    st.markdown(
-        "**Semáforo**\n"
-        "- 🟢 **Óptimo** ≥ 5.0\n"
-        "- 🟡 **En riesgo** 4.5 – 4.99\n"
-        "- 🔴 **Bajo estándar** < 4.5"
-    )
-
-if not archivos:
-    st.info("👈 Sube uno o más archivos TXT desde el panel lateral para comenzar.")
-    st.stop()
-
-# ── DATOS ──────────────────────────────────────────────────────────────────────
-
-grp = cargar_datos(tuple(archivos))
+grp = cargar_datos()
 
 if grp.empty:
-    st.error("No se encontraron registros con los filtros aplicados. Revisa los archivos.")
+    st.error("No se encontraron archivos en la carpeta /data. Verifica que los TXT estén subidos al repositorio.")
     st.stop()
 
-# ── FILTROS ────────────────────────────────────────────────────────────────────
+# ── FILTROS SIDEBAR ────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("🔍 Filtros")
@@ -194,6 +157,14 @@ with st.sidebar:
         default=["Óptimo", "En riesgo", "Bajo estándar", "Sin dato"],
     )
 
+    st.markdown("---")
+    st.markdown(
+        "**Semáforo**\n"
+        "- 🟢 **Óptimo** ≥ 5.0\n"
+        "- 🟡 **En riesgo** 4.5 – 4.99\n"
+        "- 🔴 **Bajo estándar** < 4.5"
+    )
+
 df = grp[
     grp["MES"].isin(sel_mes) &
     grp["SERVICIO"].isin(sel_srv) &
@@ -212,19 +183,18 @@ vals = df["RENDIMIENTO"].dropna()
 n_verde    = (vals >= 5.0).sum()
 n_amarillo = ((vals >= 4.5) & (vals < 5.0)).sum()
 n_rojo     = (vals < 4.5).sum()
-n_nd       = df["RENDIMIENTO"].isna().sum()
 pct_verde  = n_verde / len(vals) * 100 if len(vals) else 0
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("📋 Registros",        len(df))
-k2.metric("📊 Promedio",         f"{vals.mean():.2f}" if len(vals) else "—")
-k3.metric("🟢 Óptimo",           f"{n_verde}  ({pct_verde:.0f}%)")
-k4.metric("🟡 En riesgo",        str(n_amarillo))
-k5.metric("🔴 Bajo estándar",    str(n_rojo))
+k1.metric("📋 Registros",     len(df))
+k2.metric("📊 Promedio",      f"{vals.mean():.2f}" if len(vals) else "—")
+k3.metric("🟢 Óptimo",        f"{n_verde}  ({pct_verde:.0f}%)")
+k4.metric("🟡 En riesgo",     str(n_amarillo))
+k5.metric("🔴 Bajo estándar", str(n_rojo))
 
 st.markdown("---")
 
-# ── GRÁFICOS ───────────────────────────────────────────────────────────────────
+# ── TABS ───────────────────────────────────────────────────────────────────────
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📈 Evolución mensual",
@@ -233,20 +203,23 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📋 Tabla detalle",
 ])
 
-# Tab 1 — Evolución mensual
+# ── TAB 1: Evolución mensual ───────────────────────────────────────────────────
 with tab1:
     evo = (
         df.groupby("MES", as_index=False, observed=True)
-          .agg(ATENCIONES=("ATENCIONES","sum"), HORAS_PROG=("HORAS_PROG","sum"))
+          .agg(ATENCIONES=("ATENCIONES", "sum"), HORAS_PROG=("HORAS_PROG", "sum"))
     )
     evo["RENDIMIENTO"] = np.where(
-        evo["HORAS_PROG"] > 0, (evo["ATENCIONES"] / evo["HORAS_PROG"]).round(2), np.nan
+        evo["HORAS_PROG"] > 0,
+        (evo["ATENCIONES"] / evo["HORAS_PROG"]).round(2), np.nan
     )
     evo["COLOR"] = evo["RENDIMIENTO"].apply(color_semaforo)
 
     fig = go.Figure()
-    fig.add_hline(y=ESTANDAR,     line_dash="dash", line_color=COLOR_VERDE,    annotation_text="Estándar (5.0)")
-    fig.add_hline(y=4.5,          line_dash="dot",  line_color=COLOR_AMARILLO, annotation_text="Mínimo aceptable (4.5)")
+    fig.add_hline(y=ESTANDAR, line_dash="dash", line_color=COLOR_VERDE,
+                  annotation_text="Estándar (5.0)")
+    fig.add_hline(y=4.5, line_dash="dot", line_color=COLOR_AMARILLO,
+                  annotation_text="Mínimo aceptable (4.5)")
     fig.add_trace(go.Scatter(
         x=evo["MES"].astype(str), y=evo["RENDIMIENTO"],
         mode="lines+markers+text",
@@ -254,20 +227,18 @@ with tab1:
         line=dict(color="#607D8B", width=2),
         text=evo["RENDIMIENTO"].apply(lambda v: f"{v:.2f}" if not pd.isna(v) else ""),
         textposition="top center",
-        name="Rendimiento",
     ))
     fig.update_layout(
-        title="Rendimiento promedio mensual (todos los servicios y médicos seleccionados)",
+        title="Rendimiento promedio mensual",
         xaxis_title="Mes", yaxis_title="Atenciones / Hora programada",
         plot_bgcolor="white", height=420,
         yaxis=dict(gridcolor="#ECEFF1"),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Por subactividad
     evo_sub = (
-        df.groupby(["MES","SUBACTIVIDAD"], as_index=False, observed=True)
-          .agg(ATENCIONES=("ATENCIONES","sum"), HORAS_PROG=("HORAS_PROG","sum"))
+        df.groupby(["MES", "SUBACTIVIDAD"], as_index=False, observed=True)
+          .agg(ATENCIONES=("ATENCIONES", "sum"), HORAS_PROG=("HORAS_PROG", "sum"))
     )
     evo_sub["RENDIMIENTO"] = np.where(
         evo_sub["HORAS_PROG"] > 0,
@@ -276,34 +247,24 @@ with tab1:
     fig2 = px.line(
         evo_sub, x="MES", y="RENDIMIENTO", color="SUBACTIVIDAD",
         markers=True, title="Evolución mensual por subactividad",
-        labels={"RENDIMIENTO":"Atenciones/hora","MES":"Mes"},
+        labels={"RENDIMIENTO": "Atenciones/hora", "MES": "Mes"},
     )
     fig2.add_hline(y=ESTANDAR, line_dash="dash", line_color=COLOR_VERDE)
     fig2.update_layout(plot_bgcolor="white", height=380, yaxis=dict(gridcolor="#ECEFF1"))
     st.plotly_chart(fig2, use_container_width=True)
 
-# Tab 2 — Por servicio
+# ── TAB 2: Por servicio ────────────────────────────────────────────────────────
 with tab2:
-    srv_df = (
-        df.groupby(["SERVICIO","MES"], as_index=False, observed=True)
-          .agg(ATENCIONES=("ATENCIONES","sum"), HORAS_PROG=("HORAS_PROG","sum"))
-    )
-    srv_df["RENDIMIENTO"] = np.where(
-        srv_df["HORAS_PROG"] > 0,
-        (srv_df["ATENCIONES"] / srv_df["HORAS_PROG"]).round(2), np.nan
-    )
-    srv_df["COLOR"] = srv_df["RENDIMIENTO"].apply(color_semaforo)
-
-    # Resumen acumulado por servicio
     srv_acum = (
         df.groupby("SERVICIO", as_index=False)
-          .agg(ATENCIONES=("ATENCIONES","sum"), HORAS_PROG=("HORAS_PROG","sum"))
+          .agg(ATENCIONES=("ATENCIONES", "sum"), HORAS_PROG=("HORAS_PROG", "sum"))
     )
     srv_acum["RENDIMIENTO"] = np.where(
         srv_acum["HORAS_PROG"] > 0,
         (srv_acum["ATENCIONES"] / srv_acum["HORAS_PROG"]).round(2), np.nan
     )
-    srv_acum["COLOR"] = srv_acum["RENDIMIENTO"].apply(color_semaforo)
+    srv_acum["COLOR"]    = srv_acum["RENDIMIENTO"].apply(color_semaforo)
+    srv_acum["SEMAFORO"] = srv_acum["RENDIMIENTO"].apply(semaforo)
     srv_acum.sort_values("RENDIMIENTO", ascending=True, inplace=True)
 
     fig3 = go.Figure(go.Bar(
@@ -313,9 +274,10 @@ with tab2:
         text=srv_acum["RENDIMIENTO"].apply(lambda v: f"{v:.2f}" if not pd.isna(v) else ""),
         textposition="outside",
     ))
-    fig3.add_vline(x=ESTANDAR, line_dash="dash", line_color=COLOR_VERDE, annotation_text="Estándar")
+    fig3.add_vline(x=ESTANDAR, line_dash="dash", line_color=COLOR_VERDE,
+                   annotation_text="Estándar")
     fig3.update_layout(
-        title="Rendimiento acumulado por servicio (período seleccionado)",
+        title="Rendimiento acumulado por servicio",
         xaxis_title="Atenciones / hora", yaxis_title="",
         plot_bgcolor="white", height=max(400, len(srv_acum) * 30),
         xaxis=dict(gridcolor="#ECEFF1"),
@@ -323,7 +285,15 @@ with tab2:
     st.plotly_chart(fig3, use_container_width=True)
 
     # Heatmap servicio x mes
-    pivot = srv_df.pivot_table(index="SERVICIO", columns="MES", values="RENDIMIENTO")
+    srv_mes = (
+        df.groupby(["SERVICIO", "MES"], as_index=False, observed=True)
+          .agg(ATENCIONES=("ATENCIONES", "sum"), HORAS_PROG=("HORAS_PROG", "sum"))
+    )
+    srv_mes["RENDIMIENTO"] = np.where(
+        srv_mes["HORAS_PROG"] > 0,
+        (srv_mes["ATENCIONES"] / srv_mes["HORAS_PROG"]).round(2), np.nan
+    )
+    pivot = srv_mes.pivot_table(index="SERVICIO", columns="MES", values="RENDIMIENTO")
     pivot = pivot.reindex(columns=[m for m in MESES_ORDER if m in pivot.columns])
 
     fig4 = go.Figure(go.Heatmap(
@@ -342,20 +312,18 @@ with tab2:
         text=[[f"{v:.2f}" if not np.isnan(v) else "" for v in row] for row in pivot.values],
         texttemplate="%{text}",
         hovertemplate="Servicio: %{y}<br>Mes: %{x}<br>Rendimiento: %{z:.2f}<extra></extra>",
-        colorbar=dict(title="Rend."),
     ))
     fig4.update_layout(
         title="Mapa de calor: rendimiento por servicio y mes",
         height=max(400, len(pivot) * 28),
-        xaxis_title="Mes", yaxis_title="",
     )
     st.plotly_chart(fig4, use_container_width=True)
 
-# Tab 3 — Por médico
+# ── TAB 3: Por médico ──────────────────────────────────────────────────────────
 with tab3:
     med_df = (
-        df.groupby(["PROFESIONAL","SERVICIO"], as_index=False)
-          .agg(ATENCIONES=("ATENCIONES","sum"), HORAS_PROG=("HORAS_PROG","sum"))
+        df.groupby(["PROFESIONAL", "SERVICIO"], as_index=False)
+          .agg(ATENCIONES=("ATENCIONES", "sum"), HORAS_PROG=("HORAS_PROG", "sum"))
     )
     med_df["RENDIMIENTO"] = np.where(
         med_df["HORAS_PROG"] > 0,
@@ -375,50 +343,50 @@ with tab3:
             "Sin dato":      COLOR_ND,
         },
         hover_data={"SERVICIO": True, "ATENCIONES": True, "HORAS_PROG": True},
-        title="Rendimiento acumulado por médico (período seleccionado)",
+        title="Rendimiento acumulado por médico",
         labels={"RENDIMIENTO": "Atenciones/hora", "PROFESIONAL": ""},
     )
-    fig5.add_vline(x=ESTANDAR, line_dash="dash", line_color="#333", annotation_text="Estándar")
+    fig5.add_vline(x=ESTANDAR, line_dash="dash", line_color="#333",
+                   annotation_text="Estándar")
     fig5.update_layout(
         plot_bgcolor="white", height=max(500, len(med_df) * 22),
-        xaxis=dict(gridcolor="#ECEFF1"), showlegend=True,
+        xaxis=dict(gridcolor="#ECEFF1"),
     )
     st.plotly_chart(fig5, use_container_width=True)
 
-    # Distribución semáforo
     sem_counts = med_df["SEMAFORO"].value_counts().reset_index()
     sem_counts.columns = ["Semáforo", "Médicos"]
-    sem_counts["Color"] = sem_counts["Semáforo"].map({
-        "Óptimo": COLOR_VERDE, "En riesgo": COLOR_AMARILLO,
-        "Bajo estándar": COLOR_ROJO, "Sin dato": COLOR_ND,
-    })
     fig6 = px.pie(
         sem_counts, names="Semáforo", values="Médicos",
         color="Semáforo",
         color_discrete_map={
-            "Óptimo": COLOR_VERDE, "En riesgo": COLOR_AMARILLO,
-            "Bajo estándar": COLOR_ROJO, "Sin dato": COLOR_ND,
+            "Óptimo":        COLOR_VERDE,
+            "En riesgo":     COLOR_AMARILLO,
+            "Bajo estándar": COLOR_ROJO,
+            "Sin dato":      COLOR_ND,
         },
         title="Distribución de médicos por semáforo",
         hole=0.4,
     )
     st.plotly_chart(fig6, use_container_width=True)
 
-# Tab 4 — Tabla detalle
+# ── TAB 4: Tabla detalle ───────────────────────────────────────────────────────
 with tab4:
     tabla = df[[
-        "MES","SERVICIO","PROFESIONAL","SUBACTIVIDAD",
-        "ATENCIONES","HORAS_PROG","RENDIMIENTO","SEMAFORO"
+        "MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD",
+        "ATENCIONES", "HORAS_PROG", "RENDIMIENTO", "SEMAFORO"
     ]].copy()
     tabla["MES"] = tabla["MES"].astype(str)
 
     def colorear_fila(row):
         c = color_semaforo(row["RENDIMIENTO"])
         texto = "white" if c == COLOR_ROJO else "black"
-        return [""] * (len(row) - 2) + [
+        estilos = [""] * (len(row) - 2)
+        estilos += [
             f"background-color:{c};color:{texto};font-weight:bold",
             f"background-color:{c};color:{texto};font-weight:bold",
         ]
+        return estilos
 
     st.dataframe(
         tabla.style.apply(colorear_fila, axis=1).format({"RENDIMIENTO": "{:.2f}"}),
@@ -426,11 +394,11 @@ with tab4:
         height=500,
     )
 
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
+    col1, col2 = st.columns(2)
+    with col1:
         csv = tabla.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Descargar CSV", csv, "rendimiento_medico.csv", "text/csv")
-    with col_dl2:
+    with col2:
         xlsx_bytes = exportar_excel(tabla)
         st.download_button(
             "⬇️ Descargar Excel", xlsx_bytes,
