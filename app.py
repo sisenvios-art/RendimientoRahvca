@@ -1,5 +1,5 @@
 # =============================================================================
-# Dashboard: Rendimiento Hora Médico - H. II Huancavelica 2026
+# Dashboard: Rendimiento Hora Médico - H. II Huancavelica 2026 -
 # =============================================================================
 # Descripción : Evalúa el rendimiento hora médico por mes, servicio y médico
 # Cálculo     : ATE / HRAS_PROG  (atenciones / horas programadas)
