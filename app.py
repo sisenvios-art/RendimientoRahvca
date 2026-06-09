@@ -126,6 +126,8 @@ def cargar_datos() -> pd.DataFrame:
     columnas = '"PERIODO","SERVICIO","PROFESIONAL","SUBACTIVIDAD","ATE","HRAS_PROG","GRPO_OCUPACIONAL"'
 
     # Paginación: traer todas las filas del grupo MEDICO de 1000 en 1000
+    # Se omite el filtro .eq() para evitar problemas de case-sensitivity
+    # y se filtra todo en Python
     todos  = []
     offset = 0
     batch  = 1000
@@ -134,7 +136,6 @@ def cargar_datos() -> pd.DataFrame:
         respuesta = (
             supabase.table(tabla)
             .select(columnas)
-            .eq("GRPO_OCUPACIONAL", GRUPO)   # filtro por grupo ocupacional
             .range(offset, offset + batch - 1)
             .execute()
         )
@@ -151,7 +152,17 @@ def cargar_datos() -> pd.DataFrame:
 
     datos = pd.DataFrame(todos)
 
-    # Filtrar subactividades en Python (evita problemas de encoding en Supabase)
+    # Depuración temporal — mostrar valores únicos recibidos
+    st.sidebar.markdown("**DEBUG (eliminar luego)**")
+    st.sidebar.write("Filas totales:", len(datos))
+    st.sidebar.write("Columnas:", list(datos.columns))
+    if "GRPO_OCUPACIONAL" in datos.columns:
+        st.sidebar.write("Grupos únicos:", datos["GRPO_OCUPACIONAL"].unique().tolist())
+    if "SUBACTIVIDAD" in datos.columns:
+        st.sidebar.write("Subactividades únicas:", datos["SUBACTIVIDAD"].unique().tolist()[:10])
+
+    # Filtrar grupo y subactividades en Python
+    datos = datos[datos["GRPO_OCUPACIONAL"] == GRUPO].copy()
     datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
 
     if datos.empty:
