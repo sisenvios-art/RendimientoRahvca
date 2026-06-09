@@ -121,8 +121,9 @@ def cargar_datos() -> pd.DataFrame:
     supabase = conectar_supabase()
     tabla    = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
 
-    # Columnas necesarias para el dashboard (reduce el payload de la consulta)
-    columnas = "MES,SERVICIO,PROFESIONAL,SUBACTIVIDAD,ATE,HRAS_PROG,GRPO_OCUPACIONAL"
+    # PERIODO contiene la fecha (ej: "01/05/2026") — no existe columna MES en la tabla
+    # Se selecciona PERIODO y se deriva el mes en Python
+    columnas = '"PERIODO","SERVICIO","PROFESIONAL","SUBACTIVIDAD","ATE","HRAS_PROG","GRPO_OCUPACIONAL"'
 
     # Supabase pagina por defecto a 1000 filas — iteramos hasta traer todo
     todos = []
@@ -151,6 +152,15 @@ def cargar_datos() -> pd.DataFrame:
 
     datos = pd.DataFrame(todos)
 
+    # Derivar columna MES desde PERIODO (soporta dd/mm/yyyy e yyyy-mm-dd)
+    MAPA_MESES = {
+        1: "Enero", 2: "Febrero",   3: "Marzo",     4: "Abril",
+        5: "Mayo",  6: "Junio",     7: "Julio",      8: "Agosto",
+        9: "Setiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+    }
+    fechas = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce")
+    datos["MES"] = fechas.dt.month.map(MAPA_MESES)
+
     # Convertir columnas numéricas; reemplaza valores no numéricos con 0
     datos["ATE"]       = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
     datos["HRAS_PROG"] = pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
@@ -166,7 +176,7 @@ def cargar_datos() -> pd.DataFrame:
         HORAS_PROG=("HRAS_PROG", "sum"),
     )
 
-    # Aplicar orden cronológico a los meses disponibles
+    # Aplicar orden cronológico solo a los meses con datos reales
     meses_presentes = [m for m in MESES_ORDER if m in grp["MES"].values]
     grp["MES"] = pd.Categorical(grp["MES"], categories=meses_presentes, ordered=True)
     grp.sort_values(["MES", "SERVICIO", "PROFESIONAL"], inplace=True)
