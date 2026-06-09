@@ -115,18 +115,18 @@ def cargar_datos() -> pd.DataFrame:
     y las subactividades definidas, calcula el rendimiento (ATE / HRAS_PROG)
     y anonimiza los nombres. Retorna un DataFrame agrupado y ordenado.
 
-    El caché de 10 minutos (ttl=600) evita consultas repetidas a la base
-    de datos en cada interacción del usuario.
+    Estrategia de filtrado: se traen solo las filas del grupo MEDICO
+    paginando de 1000 en 1000, y el filtro de subactividad se aplica
+    en Python para evitar problemas de case-sensitivity en Supabase.
     """
     supabase = conectar_supabase()
     tabla    = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
 
-    # PERIODO contiene la fecha (ej: "01/05/2026") — no existe columna MES en la tabla
-    # Se selecciona PERIODO y se deriva el mes en Python
+    # Columnas a traer — PERIODO en lugar de MES (no existe esa columna)
     columnas = '"PERIODO","SERVICIO","PROFESIONAL","SUBACTIVIDAD","ATE","HRAS_PROG","GRPO_OCUPACIONAL"'
 
-    # Supabase pagina por defecto a 1000 filas — iteramos hasta traer todo
-    todos = []
+    # Paginación: traer todas las filas del grupo MEDICO de 1000 en 1000
+    todos  = []
     offset = 0
     batch  = 1000
 
@@ -134,14 +134,13 @@ def cargar_datos() -> pd.DataFrame:
         respuesta = (
             supabase.table(tabla)
             .select(columnas)
-            .eq("GRPO_OCUPACIONAL", GRUPO)           # filtro grupo ocupacional
-            .in_("SUBACTIVIDAD", SUBACTIVIDADES)      # filtro subactividades
-            .range(offset, offset + batch - 1)        # paginación
+            .eq("GRPO_OCUPACIONAL", GRUPO)   # filtro por grupo ocupacional
+            .range(offset, offset + batch - 1)
             .execute()
         )
         filas = respuesta.data
         if not filas:
-            break  # no hay más filas
+            break
         todos.extend(filas)
         if len(filas) < batch:
             break  # última página
@@ -152,13 +151,20 @@ def cargar_datos() -> pd.DataFrame:
 
     datos = pd.DataFrame(todos)
 
-    # Derivar columna MES desde PERIODO (soporta dd/mm/yyyy e yyyy-mm-dd)
+    # Filtrar subactividades en Python (evita problemas de encoding en Supabase)
+    datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
+
+    if datos.empty:
+        return pd.DataFrame()
+
+    # Derivar columna MES desde PERIODO (formato dd/mm/yyyy o yyyy-mm-dd)
     MAPA_MESES = {
-        1: "Enero", 2: "Febrero",   3: "Marzo",     4: "Abril",
-        5: "Mayo",  6: "Junio",     7: "Julio",      8: "Agosto",
-        9: "Setiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+        1: "Enero",     2: "Febrero",   3: "Marzo",
+        4: "Abril",     5: "Mayo",      6: "Junio",
+        7: "Julio",     8: "Agosto",    9: "Setiembre",
+        10: "Octubre",  11: "Noviembre", 12: "Diciembre"
     }
-    fechas = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce")
+    fechas       = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce")
     datos["MES"] = fechas.dt.month.map(MAPA_MESES)
 
     # Convertir columnas numéricas; reemplaza valores no numéricos con 0
@@ -194,8 +200,6 @@ def cargar_datos() -> pd.DataFrame:
 
     return grp
 
-
-# ── EXPORTACIÓN A EXCEL ───────────────────────────────────────────────────────
 
 def exportar_excel(df: pd.DataFrame) -> bytes:
     """
