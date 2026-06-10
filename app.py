@@ -269,6 +269,22 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+# grp = cargar_datos()
+# TEST CONEXION
+import httpx as _hx
+_url   = st.secrets["SUPABASE_URL"]
+_key   = st.secrets["SUPABASE_KEY"]
+_tabla = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
+_r = _hx.get(
+    f"{_url}/rest/v1/{_tabla}",
+    headers={"apikey": _key, "Authorization": f"Bearer {_key}"},
+    params={"select": "GRPO_OCUPACIONAL", "limit": "3"},
+    timeout=30,
+)
+st.write("Status:", _r.status_code)
+st.write("Respuesta:", _r.text[:500])
+st.stop()
+
 grp = cargar_datos()
 
 if grp.empty:
