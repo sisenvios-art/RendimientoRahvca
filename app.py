@@ -1,5 +1,5 @@
 # =============================================================================
-# Dashboard: Rendimiento Hora Médico - H. II Huancavelica 2026 -
+# Dashboard: Rendimiento Hora Médico - H. II Huancavelica 2026
 # =============================================================================
 # Descripción : Evalúa el rendimiento hora médico por mes, servicio y médico
 # Cálculo     : ATE / HRAS_PROG  (atenciones / horas programadas)
@@ -111,40 +111,52 @@ def color_semaforo(val) -> str:
 @st.cache_data(ttl=600)  # Cachea 10 minutos para no sobrecargar Supabase
 def cargar_datos() -> pd.DataFrame:
     """
-    Consulta la tabla de Supabase, filtra por grupo ocupacional MEDICO
-    y las subactividades definidas, calcula el rendimiento (ATE / HRAS_PROG)
-    y anonimiza los nombres. Retorna un DataFrame agrupado y ordenado.
-
-    Estrategia de filtrado: se traen solo las filas del grupo MEDICO
-    paginando de 1000 en 1000, y el filtro de subactividad se aplica
-    en Python para evitar problemas de case-sensitivity en Supabase.
+    Consulta la tabla de Supabase via API REST directa (httpx),
+    filtra en Python por grupo ocupacional y subactividades,
+    calcula el rendimiento (ATE / HRAS_PROG) y anonimiza nombres.
     """
-    supabase = conectar_supabase()
-    tabla    = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
+    url   = st.secrets["SUPABASE_URL"]
+    key   = st.secrets["SUPABASE_KEY"]
+    tabla = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
 
-    # Columnas a traer — PERIODO en lugar de MES (no existe esa columna)
-    columnas = '"PERIODO","SERVICIO","PROFESIONAL","SUBACTIVIDAD","ATE","HRAS_PROG","GRPO_OCUPACIONAL"'
+    # Headers requeridos por la API REST de Supabase (PostgREST)
+    headers = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+    }
 
-    # Paginación: traer todas las filas del grupo MEDICO de 1000 en 1000
-    # Se omite el filtro .eq() para evitar problemas de case-sensitivity
-    # y se filtra todo en Python
+    # Columnas a traer — sin MES (no existe), se deriva de PERIODO
+    columnas = "PERIODO,SERVICIO,PROFESIONAL,SUBACTIVIDAD,ATE,HRAS_PROG,GRPO_OCUPACIONAL"
+
+    # Paginación con offset/limit via API REST de PostgREST
     todos  = []
     offset = 0
     batch  = 1000
 
+    import httpx
+
     while True:
-        respuesta = (
-            supabase.table(tabla)
-            .select(columnas)
-            .range(offset, offset + batch - 1)
-            .execute()
+        params = {
+            "select": columnas,
+            "GRPO_OCUPACIONAL": f"eq.{GRUPO}",   # filtro grupo ocupacional
+            "limit":  str(batch),
+            "offset": str(offset),
+        }
+        respuesta = httpx.get(
+            f"{url}/rest/v1/{tabla}",
+            headers=headers,
+            params=params,
+            timeout=30,
         )
-        filas = respuesta.data
+        respuesta.raise_for_status()
+        filas = respuesta.json()
+
         if not filas:
             break
         todos.extend(filas)
         if len(filas) < batch:
-            break  # última página
+            break
         offset += batch
 
     if not todos:
@@ -152,17 +164,7 @@ def cargar_datos() -> pd.DataFrame:
 
     datos = pd.DataFrame(todos)
 
-    # Depuración temporal — mostrar valores únicos recibidos
-    st.sidebar.markdown("**DEBUG (eliminar luego)**")
-    st.sidebar.write("Filas totales:", len(datos))
-    st.sidebar.write("Columnas:", list(datos.columns))
-    if "GRPO_OCUPACIONAL" in datos.columns:
-        st.sidebar.write("Grupos únicos:", datos["GRPO_OCUPACIONAL"].unique().tolist())
-    if "SUBACTIVIDAD" in datos.columns:
-        st.sidebar.write("Subactividades únicas:", datos["SUBACTIVIDAD"].unique().tolist()[:10])
-
-    # Filtrar grupo y subactividades en Python
-    datos = datos[datos["GRPO_OCUPACIONAL"] == GRUPO].copy()
+    # Filtrar subactividades en Python
     datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
 
     if datos.empty:
@@ -170,19 +172,19 @@ def cargar_datos() -> pd.DataFrame:
 
     # Derivar columna MES desde PERIODO (formato dd/mm/yyyy o yyyy-mm-dd)
     MAPA_MESES = {
-        1: "Enero",     2: "Febrero",   3: "Marzo",
-        4: "Abril",     5: "Mayo",      6: "Junio",
-        7: "Julio",     8: "Agosto",    9: "Setiembre",
+        1: "Enero",     2: "Febrero",    3: "Marzo",
+        4: "Abril",     5: "Mayo",       6: "Junio",
+        7: "Julio",     8: "Agosto",     9: "Setiembre",
         10: "Octubre",  11: "Noviembre", 12: "Diciembre"
     }
     fechas       = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce")
     datos["MES"] = fechas.dt.month.map(MAPA_MESES)
 
-    # Convertir columnas numéricas; reemplaza valores no numéricos con 0
+    # Convertir columnas numéricas
     datos["ATE"]       = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
     datos["HRAS_PROG"] = pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
 
-    # Anonimizar nombres ANTES de agrupar para no exponer datos personales
+    # Anonimizar nombres antes de agrupar
     datos["PROFESIONAL"] = datos["PROFESIONAL"].apply(anonimizar_nombre)
 
     # Agrupar por mes, servicio, médico y subactividad
@@ -193,12 +195,12 @@ def cargar_datos() -> pd.DataFrame:
         HORAS_PROG=("HRAS_PROG", "sum"),
     )
 
-    # Aplicar orden cronológico solo a los meses con datos reales
+    # Orden cronológico de meses
     meses_presentes = [m for m in MESES_ORDER if m in grp["MES"].values]
     grp["MES"] = pd.Categorical(grp["MES"], categories=meses_presentes, ordered=True)
     grp.sort_values(["MES", "SERVICIO", "PROFESIONAL"], inplace=True)
 
-    # Calcular rendimiento; NaN si HRAS_PROG = 0 para evitar división por cero
+    # Calcular rendimiento — NaN si HRAS_PROG = 0
     grp["RENDIMIENTO"] = np.where(
         grp["HORAS_PROG"] > 0,
         (grp["ATENCIONES"] / grp["HORAS_PROG"]).round(2),
