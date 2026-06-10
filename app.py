@@ -159,8 +159,12 @@ def cargar_datos() -> pd.DataFrame:
             break
         offset += batch
 
-    if not todos:
-        return pd.DataFrame()
+if not todos:
+    st.error(f"Supabase devolvió 0 filas. URL: {url}/rest/v1/{tabla}")
+    return pd.DataFrame()
+
+st.sidebar.write("Filas brutas recibidas:", len(todos))
+st.sidebar.write("Columnas:", list(todos[0].keys()) if todos else "vacío")
 
     datos = pd.DataFrame(todos)
 
