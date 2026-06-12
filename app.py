@@ -438,26 +438,45 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("📧 Alertas por email")
+
+    # Filtros específicos para el envío de alertas
+    alerta_meses = st.multiselect(
+        "Meses a incluir en alerta",
+        options=meses_disp,
+        default=meses_disp,
+        key="alerta_mes",
+    )
+    alerta_servicios = st.multiselect(
+        "Servicios a incluir en alerta",
+        options=servicios_disp,
+        default=servicios_disp,
+        key="alerta_srv",
+    )
     email_destino = st.text_input(
         "Email destino",
         placeholder="correo@ejemplo.com",
-        help="Recibirá la lista de médicos bajo el umbral de rendimiento"
+        help="Recibirá la lista de médicos bajo el umbral de rendimiento",
     )
+
     if st.button("🚨 Enviar alerta de bajo rendimiento"):
         if not email_destino:
             st.warning("Ingresa un email destino.")
         elif "RESEND_API_KEY" not in st.secrets:
             st.error("Agrega RESEND_API_KEY en los Secrets de Streamlit Cloud.")
         else:
-            # Filtrar médicos bajo el umbral en todos los meses
-            df_bajo = grp[grp["RENDIMIENTO"] < UMBRAL_RIESGO].copy()
+            # Filtrar por meses y servicios seleccionados en la sección de alertas
+            df_bajo = grp[
+                grp["MES"].isin(alerta_meses) &
+                grp["SERVICIO"].isin(alerta_servicios) &
+                (grp["RENDIMIENTO"] < UMBRAL_RIESGO)
+            ].copy()
             if df_bajo.empty:
-                st.success("✅ Ningún médico está bajo el umbral. ¡Sin alertas!")
+                st.success("✅ Ningún médico está bajo el umbral en el período y servicios seleccionados.")
             else:
                 with st.spinner("Enviando email..."):
                     ok = enviar_alerta_email(df_bajo, email_destino)
                 if ok:
-                    st.success(f"✅ Alerta enviada a {email_destino} con {len(df_bajo)} caso(s).")
+                    st.success(f"✅ Alerta enviada a {email_destino} — {len(df_bajo)} caso(s) en {len(alerta_meses)} mes(es) y {len(alerta_servicios)} servicio(s).")
                 else:
                     st.error("No se pudo enviar el email. Revisa la API key de Resend.")
 
