@@ -38,7 +38,7 @@ MESES_ORDER = [
 GRUPO          = "MEDICO"
 SUBACTIVIDADES = ["CONSULTA MEDICA", "ATENCION ADULTO MAYOR FRAGIL"]
 ESTANDAR       = 5.0   # atenciones/hora — umbral óptimo
-UMBRAL_RIESGO  = 4.5   # por debajo de este valor se considera "En riesgo"
+UMBRAL_RIESGO  = 4.9   # por debajo de este valor se considera "En riesgo"
 
 # Colores del semáforo
 COLOR_VERDE    = "#4CAF50"
