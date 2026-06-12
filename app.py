@@ -24,6 +24,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import httpx
+import resend
 from supabase import create_client, Client
 
 # ── CONFIGURACIÓN GENERAL ─────────────────────────────────────────────────────
