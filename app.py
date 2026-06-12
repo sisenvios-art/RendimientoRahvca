@@ -158,59 +158,177 @@ def calcular_tendencia(grp: pd.DataFrame) -> pd.DataFrame:
 
 # ── ALERTAS POR EMAIL ─────────────────────────────────────────────────────────
 
-def enviar_alerta_email(df_bajo: pd.DataFrame, email_destino: str) -> bool:
+def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email_destino: str) -> bool:
     """
-    Envía un email con la lista de médicos bajo el umbral de rendimiento
-    usando Resend. Requiere RESEND_API_KEY en los secrets de Streamlit.
-    Retorna True si el envío fue exitoso, False en caso contrario.
+    Envía un informe HTML por email con:
+    - Resumen ejecutivo del período analizado
+    - Sección por cada servicio con médicos bajo el umbral
+    - Promedio anual a la fecha por cada médico afectado
+    Usa Resend. Requiere RESEND_API_KEY en los secrets de Streamlit.
     """
     try:
         resend.api_key = st.secrets["RESEND_API_KEY"]
 
-        # Construir tabla HTML con los médicos bajo el umbral
-        filas_html = ""
-        for _, r in df_bajo.iterrows():
-            color = "#FF6B6B" if r["RENDIMIENTO"] < UMBRAL_RIESGO else "#FFD966"
-            filas_html += f"""
-                <tr>
-                    <td style='padding:6px;border:1px solid #ddd'>{r['MES']}</td>
-                    <td style='padding:6px;border:1px solid #ddd'>{r['SERVICIO']}</td>
-                    <td style='padding:6px;border:1px solid #ddd'>{r['PROFESIONAL']}</td>
-                    <td style='padding:6px;border:1px solid #ddd'>{r['SUBACTIVIDAD']}</td>
-                    <td style='padding:6px;border:1px solid #ddd;background:{color};
-                               font-weight:bold;text-align:center'>
-                        {r['RENDIMIENTO']:.2f}
-                    </td>
-                </tr>"""
+        meses_incluidos = sorted(df_bajo["MES"].unique().tolist())
+        servicios_afectados = sorted(df_bajo["SERVICIO"].unique().tolist())
+        total_casos = len(df_bajo)
 
-        html = f"""
-        <html><body>
-        <h2 style='color:#1F4E79'>⚠️ Alerta de Rendimiento Hora Médico</h2>
-        <p>H. II Huancavelica — Los siguientes médicos tienen rendimiento
-        <strong>por debajo del umbral ({UMBRAL_RIESGO})</strong>:</p>
-        <table style='border-collapse:collapse;width:100%;font-family:Arial,sans-serif'>
-            <thead>
-                <tr style='background:#1F4E79;color:white'>
-                    <th style='padding:8px;border:1px solid #ddd'>Mes</th>
-                    <th style='padding:8px;border:1px solid #ddd'>Servicio</th>
-                    <th style='padding:8px;border:1px solid #ddd'>Médico</th>
-                    <th style='padding:8px;border:1px solid #ddd'>Subactividad</th>
-                    <th style='padding:8px;border:1px solid #ddd'>Rendimiento</th>
+        # Calcular promedio anual a la fecha por médico (sobre todos los meses disponibles)
+        prom_anual = (
+            grp_completo.groupby("PROFESIONAL", as_index=False)
+            .agg(ATE_TOTAL=("ATENCIONES", "sum"), HRS_TOTAL=("HORAS_PROG", "sum"))
+        )
+        prom_anual["PROM_ANUAL"] = np.where(
+            prom_anual["HRS_TOTAL"] > 0,
+            (prom_anual["ATE_TOTAL"] / prom_anual["HRS_TOTAL"]).round(2),
+            np.nan,
+        )
+        prom_dict = prom_anual.set_index("PROFESIONAL")["PROM_ANUAL"].to_dict()
+
+        # Estilos base reutilizables
+        st_card   = "background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,0.08)"
+        st_badge_r = "display:inline-block;background:#FF6B6B;color:white;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
+        st_badge_a = "display:inline-block;background:#FFC107;color:#333;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
+        st_badge_g = "display:inline-block;background:#4CAF50;color:white;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
+
+        def badge_rend(val):
+            if pd.isna(val): return f"<span style='{st_badge_a}'>S/D</span>"
+            if val >= ESTANDAR: return f"<span style='{st_badge_g}'>{val:.2f}</span>"
+            if val >= UMBRAL_RIESGO: return f"<span style='{st_badge_a}'>{val:.2f}</span>"
+            return f"<span style='{st_badge_r}'>{val:.2f}</span>"
+
+        def semaforo_texto(val):
+            if pd.isna(val): return "Sin dato"
+            if val >= ESTANDAR: return "✅ Óptimo"
+            if val >= UMBRAL_RIESGO: return "⚠️ En riesgo"
+            return "🔴 Bajo estándar"
+
+        # ── Secciones por servicio ────────────────────────────────────────────
+        secciones_html = ""
+        for servicio in servicios_afectados:
+            df_srv = df_bajo[df_bajo["SERVICIO"] == servicio].copy()
+            meses_srv = sorted(df_srv["MES"].unique().tolist())
+
+            # Tarjetas por mes dentro del servicio
+            meses_cards = ""
+            for mes in meses_srv:
+                df_mes = df_srv[df_srv["MES"] == mes].copy()
+                medicos_html = ""
+                for _, r in df_mes.iterrows():
+                    prom = prom_dict.get(r["PROFESIONAL"], np.nan)
+                    tend = r.get("TENDENCIA", "—")
+                    tend_color = "#4CAF50" if tend == "↑" else ("#F44336" if tend == "↓" else "#888")
+                    medicos_html += f"""
+                    <div style='display:flex;align-items:center;justify-content:space-between;
+                                padding:10px 12px;border-bottom:1px solid #f0f0f0'>
+                        <div>
+                            <div style='font-weight:600;font-size:14px;color:#1F4E79'>
+                                {r['PROFESIONAL']}
+                                <span style='color:{tend_color};margin-left:6px;font-size:16px'>{tend}</span>
+                            </div>
+                            <div style='font-size:12px;color:#888;margin-top:2px'>
+                                {r['SUBACTIVIDAD'].title()} &nbsp;·&nbsp;
+                                Promedio anual: {badge_rend(prom)}
+                            </div>
+                        </div>
+                        <div style='text-align:right'>
+                            <div style='font-size:11px;color:#aaa'>Este mes</div>
+                            {badge_rend(r['RENDIMIENTO'])}
+                            <div style='font-size:11px;color:#aaa;margin-top:2px'>{semaforo_texto(r['RENDIMIENTO'])}</div>
+                        </div>
+                    </div>"""
+
+                meses_cards += f"""
+                <div style='margin-bottom:10px'>
+                    <div style='background:#E3F2FD;color:#1F4E79;font-weight:600;font-size:13px;
+                                padding:6px 12px;border-radius:4px 4px 0 0'>
+                        📅 {mes} — {len(df_mes)} médico(s) con bajo rendimiento
+                    </div>
+                    <div style='border:1px solid #e0e0e0;border-top:none;border-radius:0 0 4px 4px;background:#fafafa'>
+                        {medicos_html}
+                    </div>
+                </div>"""
+
+            secciones_html += f"""
+            <div style='{st_card}'>
+                <h3 style='color:#1F4E79;margin:0 0 12px 0;font-size:16px;border-bottom:2px solid #1F4E79;padding-bottom:6px'>
+                    🏥 {servicio}
+                </h3>
+                {meses_cards}
+            </div>"""
+
+        # ── Resumen ejecutivo ─────────────────────────────────────────────────
+        resumen_html = f"""
+        <div style='{st_card};background:#FFF8E1;border-left:4px solid #FFC107'>
+            <h3 style='color:#E65100;margin:0 0 10px 0;font-size:15px'>📊 Resumen ejecutivo</h3>
+            <table style='width:100%;font-size:13px;color:#333'>
+                <tr>
+                    <td style='padding:4px 0'>📅 Período analizado</td>
+                    <td style='font-weight:600'>{", ".join(meses_incluidos)}</td>
                 </tr>
-            </thead>
-            <tbody>{filas_html}</tbody>
-        </table>
-        <p style='color:#666;font-size:12px;margin-top:20px'>
-            Estándar: {ESTANDAR} atenciones/hora · Cálculo: ATE ÷ HRAS_PROG<br>
-            Dashboard: <a href='#'>Ver dashboard completo</a>
-        </p>
-        </body></html>
-        """
+                <tr>
+                    <td style='padding:4px 0'>🏥 Servicios con alertas</td>
+                    <td style='font-weight:600'>{len(servicios_afectados)} de los seleccionados</td>
+                </tr>
+                <tr>
+                    <td style='padding:4px 0'>👨‍⚕️ Casos bajo umbral</td>
+                    <td style='font-weight:600'>{total_casos} registro(s)</td>
+                </tr>
+                <tr>
+                    <td style='padding:4px 0'>⚠️ Umbral de alerta</td>
+                    <td style='font-weight:600'>&lt; {UMBRAL_RIESGO} atenciones/hora</td>
+                </tr>
+                <tr>
+                    <td style='padding:4px 0'>🎯 Estándar óptimo</td>
+                    <td style='font-weight:600'>≥ {ESTANDAR} atenciones/hora</td>
+                </tr>
+            </table>
+        </div>"""
+
+        # ── HTML completo ─────────────────────────────────────────────────────
+        html = f"""
+        <html>
+        <body style='margin:0;padding:0;background:#F5F7FA;font-family:Arial,sans-serif'>
+        <div style='max-width:640px;margin:0 auto;padding:24px 16px'>
+
+            <!-- Encabezado -->
+            <div style='background:#1F4E79;border-radius:10px 10px 0 0;padding:24px;text-align:center;margin-bottom:0'>
+                <h1 style='color:white;margin:0;font-size:20px'>⚠️ Alerta de Rendimiento Hora Médico</h1>
+                <p style='color:#B3D4F5;margin:6px 0 0 0;font-size:13px'>
+                    H. II Huancavelica &nbsp;·&nbsp; Grupo Ocupacional: MÉDICO
+                </p>
+            </div>
+
+            <!-- Banda de alerta -->
+            <div style='background:#FF6B6B;padding:10px;text-align:center;margin-bottom:20px'>
+                <span style='color:white;font-weight:700;font-size:14px'>
+                    {total_casos} médico(s) con rendimiento bajo {UMBRAL_RIESGO} atenciones/hora
+                </span>
+            </div>
+
+            {resumen_html}
+
+            <!-- Secciones por servicio -->
+            <h2 style='color:#1F4E79;font-size:15px;margin:20px 0 12px 0'>
+                📋 Detalle por servicio y período
+            </h2>
+            {secciones_html}
+
+            <!-- Pie -->
+            <div style='text-align:center;color:#aaa;font-size:11px;margin-top:24px;padding-top:16px;
+                        border-top:1px solid #e0e0e0'>
+                Cálculo: ATE ÷ HRAS_PROG &nbsp;·&nbsp;
+                Nombres mostrados como iniciales (protección de datos) &nbsp;·&nbsp;
+                Generado automáticamente por el Dashboard de Rendimiento
+            </div>
+
+        </div>
+        </body></html>"""
 
         resend.Emails.send({
             "from":    "alertas@resend.dev",
             "to":      [email_destino],
-            "subject": f"⚠️ Alerta rendimiento médico — {len(df_bajo)} caso(s) bajo {UMBRAL_RIESGO}",
+            "subject": f"⚠️ Alerta rendimiento médico — {total_casos} caso(s) en {len(meses_incluidos)} mes(es)",
             "html":    html,
         })
         return True
@@ -474,7 +592,7 @@ with st.sidebar:
                 st.success("✅ Ningún médico está bajo el umbral en el período y servicios seleccionados.")
             else:
                 with st.spinner("Enviando email..."):
-                    ok = enviar_alerta_email(df_bajo, email_destino)
+                    ok = enviar_alerta_email(df_bajo, grp, email_destino)
                 if ok:
                     st.success(f"✅ Alerta enviada a {email_destino} — {len(df_bajo)} caso(s) en {len(alerta_meses)} mes(es) y {len(alerta_servicios)} servicio(s).")
                 else:
