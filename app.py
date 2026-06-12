@@ -160,175 +160,208 @@ def calcular_tendencia(grp: pd.DataFrame) -> pd.DataFrame:
 
 def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email_destino: str) -> bool:
     """
-    Envía un informe HTML por email con:
-    - Resumen ejecutivo del período analizado
-    - Sección por cada servicio con médicos bajo el umbral
-    - Promedio anual a la fecha por cada médico afectado
-    Usa Resend. Requiere RESEND_API_KEY en los secrets de Streamlit.
+    Envía un informe HTML compacto con tabla matricial:
+    filas = servicio + médico | columnas = mes | celdas = rendimiento con semáforo
+    Incluye columna de promedio anual a la fecha y conteo de meses cumplidos.
     """
     try:
         resend.api_key = st.secrets["RESEND_API_KEY"]
 
-        meses_incluidos = sorted(df_bajo["MES"].unique().tolist())
-        servicios_afectados = sorted(df_bajo["SERVICIO"].unique().tolist())
-        total_casos = len(df_bajo)
+        meses_col = [m for m in MESES_ORDER if m in grp_completo["MES"].values]
+        n_meses   = len(meses_col)
 
-        # Calcular promedio anual a la fecha por médico (sobre todos los meses disponibles)
+        # ── Promedio anual a la fecha por médico ──────────────────────────────
         prom_anual = (
             grp_completo.groupby("PROFESIONAL", as_index=False)
-            .agg(ATE_TOTAL=("ATENCIONES", "sum"), HRS_TOTAL=("HORAS_PROG", "sum"))
+            .agg(ATE=("ATENCIONES","sum"), HRS=("HORAS_PROG","sum"))
         )
-        prom_anual["PROM_ANUAL"] = np.where(
-            prom_anual["HRS_TOTAL"] > 0,
-            (prom_anual["ATE_TOTAL"] / prom_anual["HRS_TOTAL"]).round(2),
-            np.nan,
+        prom_anual["PROM"] = np.where(
+            prom_anual["HRS"] > 0,
+            (prom_anual["ATE"] / prom_anual["HRS"]).round(2), np.nan
         )
-        prom_dict = prom_anual.set_index("PROFESIONAL")["PROM_ANUAL"].to_dict()
+        prom_dict = prom_anual.set_index("PROFESIONAL")["PROM"].to_dict()
 
-        # Estilos base reutilizables
-        st_card   = "background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,0.08)"
-        st_badge_r = "display:inline-block;background:#FF6B6B;color:white;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
-        st_badge_a = "display:inline-block;background:#FFC107;color:#333;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
-        st_badge_g = "display:inline-block;background:#4CAF50;color:white;font-weight:700;padding:3px 10px;border-radius:12px;font-size:13px"
+        # ── Pivot: médico x mes → rendimiento ────────────────────────────────
+        pivot = grp_completo.groupby(["PROFESIONAL","SERVICIO","MES"], as_index=False).agg(
+            ATE=("ATENCIONES","sum"), HRS=("HORAS_PROG","sum")
+        )
+        pivot["REND"] = np.where(pivot["HRS"]>0, (pivot["ATE"]/pivot["HRS"]).round(2), np.nan)
 
-        def badge_rend(val):
-            if pd.isna(val): return f"<span style='{st_badge_a}'>S/D</span>"
-            if val >= ESTANDAR: return f"<span style='{st_badge_g}'>{val:.2f}</span>"
-            if val >= UMBRAL_RIESGO: return f"<span style='{st_badge_a}'>{val:.2f}</span>"
-            return f"<span style='{st_badge_r}'>{val:.2f}</span>"
+        # Ordenar por servicio luego médico
+        pivot = pivot.sort_values(["SERVICIO","PROFESIONAL"])
+        medicos_srv = pivot[["PROFESIONAL","SERVICIO"]].drop_duplicates().values.tolist()
 
-        def semaforo_texto(val):
-            if pd.isna(val): return "Sin dato"
-            if val >= ESTANDAR: return "✅ Óptimo"
-            if val >= UMBRAL_RIESGO: return "⚠️ En riesgo"
-            return "🔴 Bajo estándar"
+        # ── Helpers de color ──────────────────────────────────────────────────
+        def bg(val):
+            if pd.isna(val): return "#F5F5F5","#999"
+            if val >= ESTANDAR: return "#C8E6C9","#1B5E20"
+            if val >= UMBRAL_RIESGO: return "#FFF9C4","#856D00"
+            return "#FFCDD2","#B71C1C"
 
-        # ── Secciones por servicio ────────────────────────────────────────────
-        secciones_html = ""
-        for servicio in servicios_afectados:
-            df_srv = df_bajo[df_bajo["SERVICIO"] == servicio].copy()
-            meses_srv = sorted(df_srv["MES"].unique().tolist())
+        def cell(val):
+            b,t = bg(val)
+            txt = f"{val:.2f}" if not pd.isna(val) else "—"
+            return f"<td style='padding:5px 8px;border:1px solid #e0e0e0;background:{b};color:{t};font-weight:700;text-align:center;font-size:12px'>{txt}</td>"
 
-            # Tarjetas por mes dentro del servicio
-            meses_cards = ""
-            for mes in meses_srv:
-                df_mes = df_srv[df_srv["MES"] == mes].copy()
-                medicos_html = ""
-                for _, r in df_mes.iterrows():
-                    prom = prom_dict.get(r["PROFESIONAL"], np.nan)
-                    tend = r.get("TENDENCIA", "—")
-                    tend_color = "#4CAF50" if tend == "↑" else ("#F44336" if tend == "↓" else "#888")
-                    medicos_html += f"""
-                    <div style='display:flex;align-items:center;justify-content:space-between;
-                                padding:10px 12px;border-bottom:1px solid #f0f0f0'>
-                        <div>
-                            <div style='font-weight:600;font-size:14px;color:#1F4E79'>
-                                {r['PROFESIONAL']}
-                                <span style='color:{tend_color};margin-left:6px;font-size:16px'>{tend}</span>
-                            </div>
-                            <div style='font-size:12px;color:#888;margin-top:2px'>
-                                {r['SUBACTIVIDAD'].title()} &nbsp;·&nbsp;
-                                Promedio anual: {badge_rend(prom)}
-                            </div>
-                        </div>
-                        <div style='text-align:right'>
-                            <div style='font-size:11px;color:#aaa'>Este mes</div>
-                            {badge_rend(r['RENDIMIENTO'])}
-                            <div style='font-size:11px;color:#aaa;margin-top:2px'>{semaforo_texto(r['RENDIMIENTO'])}</div>
-                        </div>
-                    </div>"""
+        def prom_cell(val):
+            b,t = bg(val)
+            txt = f"{val:.2f}" if not pd.isna(val) else "—"
+            return f"<td style='padding:5px 8px;border:1px solid #e0e0e0;background:{b};color:{t};font-weight:700;text-align:center;font-size:12px;border-left:2px solid #90CAF9'>{txt}</td>"
 
-                meses_cards += f"""
-                <div style='margin-bottom:10px'>
-                    <div style='background:#E3F2FD;color:#1F4E79;font-weight:600;font-size:13px;
-                                padding:6px 12px;border-radius:4px 4px 0 0'>
-                        📅 {mes} — {len(df_mes)} médico(s) con bajo rendimiento
-                    </div>
-                    <div style='border:1px solid #e0e0e0;border-top:none;border-radius:0 0 4px 4px;background:#fafafa'>
-                        {medicos_html}
-                    </div>
-                </div>"""
+        # ── Construir filas de la tabla ───────────────────────────────────────
+        filas_html  = ""
+        prev_srv    = None
+        total_med   = len(medicos_srv)
+        cumplen     = 0
 
-            secciones_html += f"""
-            <div style='{st_card}'>
-                <h3 style='color:#1F4E79;margin:0 0 12px 0;font-size:16px;border-bottom:2px solid #1F4E79;padding-bottom:6px'>
-                    🏥 {servicio}
-                </h3>
-                {meses_cards}
-            </div>"""
-
-        # ── Resumen ejecutivo ─────────────────────────────────────────────────
-        resumen_html = f"""
-        <div style='{st_card};background:#FFF8E1;border-left:4px solid #FFC107'>
-            <h3 style='color:#E65100;margin:0 0 10px 0;font-size:15px'>📊 Resumen ejecutivo</h3>
-            <table style='width:100%;font-size:13px;color:#333'>
+        for med, srv in medicos_srv:
+            # Fila separadora de servicio
+            if srv != prev_srv:
+                filas_html += f"""
                 <tr>
-                    <td style='padding:4px 0'>📅 Período analizado</td>
-                    <td style='font-weight:600'>{", ".join(meses_incluidos)}</td>
-                </tr>
-                <tr>
-                    <td style='padding:4px 0'>🏥 Servicios con alertas</td>
-                    <td style='font-weight:600'>{len(servicios_afectados)} de los seleccionados</td>
-                </tr>
-                <tr>
-                    <td style='padding:4px 0'>👨‍⚕️ Casos bajo umbral</td>
-                    <td style='font-weight:600'>{total_casos} registro(s)</td>
-                </tr>
-                <tr>
-                    <td style='padding:4px 0'>⚠️ Umbral de alerta</td>
-                    <td style='font-weight:600'>&lt; {UMBRAL_RIESGO} atenciones/hora</td>
-                </tr>
-                <tr>
-                    <td style='padding:4px 0'>🎯 Estándar óptimo</td>
-                    <td style='font-weight:600'>≥ {ESTANDAR} atenciones/hora</td>
-                </tr>
-            </table>
+                    <td colspan='{n_meses + 3}'
+                        style='background:#1F4E79;color:white;font-weight:700;
+                               font-size:12px;padding:6px 10px;letter-spacing:.04em'>
+                        🏥 {srv}
+                    </td>
+                </tr>"""
+                prev_srv = srv
+
+            # Rendimientos por mes
+            rends = {}
+            for mes in meses_col:
+                fila = pivot[(pivot["PROFESIONAL"]==med) & (pivot["MES"]==mes)]
+                rends[mes] = fila["REND"].values[0] if not fila.empty else np.nan
+
+            prom = prom_dict.get(med, np.nan)
+            meses_ok = sum(1 for v in rends.values() if not pd.isna(v) and v >= ESTANDAR)
+            if not pd.isna(prom) and prom >= ESTANDAR:
+                cumplen += 1
+
+            # Celda de cumplimiento n/total meses
+            cum_color = "#C8E6C9" if meses_ok == n_meses else ("#FFF9C4" if meses_ok > 0 else "#FFCDD2")
+            cum_txt_c = "#1B5E20" if meses_ok == n_meses else ("#856D00" if meses_ok > 0 else "#B71C1C")
+
+            celdas_mes = "".join(cell(rends[m]) for m in meses_col)
+            filas_html += f"""
+            <tr>
+                <td style='padding:5px 10px;border:1px solid #e0e0e0;font-size:12px;
+                           white-space:nowrap;font-weight:600;color:#1F4E79'>{med}</td>
+                {celdas_mes}
+                {prom_cell(prom)}
+                <td style='padding:5px 8px;border:1px solid #e0e0e0;background:{cum_color};
+                           color:{cum_txt_c};font-weight:700;text-align:center;font-size:12px'>
+                    {meses_ok}/{n_meses}
+                </td>
+            </tr>"""
+
+        # ── Encabezados de columna ────────────────────────────────────────────
+        ths_mes = "".join(
+            f"<th style='padding:7px 8px;background:#2E75B6;color:white;font-size:11px;"
+            f"text-align:center;border:1px solid #1F4E79;white-space:nowrap'>{m[:3].upper()}</th>"
+            for m in meses_col
+        )
+
+        # ── KPIs resumen ──────────────────────────────────────────────────────
+        pct = round(cumplen/total_med*100) if total_med else 0
+        bajo = total_med - cumplen
+        kpi_color = "#4CAF50" if pct>=80 else ("#FFC107" if pct>=60 else "#F44336")
+
+        kpis_html = f"""
+        <div style='display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap'>
+            <div style='flex:1;min-width:120px;background:#E3F2FD;border-radius:8px;padding:12px;text-align:center'>
+                <div style='font-size:22px;font-weight:700;color:#1F4E79'>{total_med}</div>
+                <div style='font-size:11px;color:#555'>Médicos evaluados</div>
+            </div>
+            <div style='flex:1;min-width:120px;background:#C8E6C9;border-radius:8px;padding:12px;text-align:center'>
+                <div style='font-size:22px;font-weight:700;color:#1B5E20'>{cumplen}</div>
+                <div style='font-size:11px;color:#555'>Cumplen estándar</div>
+            </div>
+            <div style='flex:1;min-width:120px;background:#FFCDD2;border-radius:8px;padding:12px;text-align:center'>
+                <div style='font-size:22px;font-weight:700;color:#B71C1C'>{bajo}</div>
+                <div style='font-size:11px;color:#555'>Bajo estándar</div>
+            </div>
+            <div style='flex:1;min-width:120px;background:{kpi_color};border-radius:8px;padding:12px;text-align:center'>
+                <div style='font-size:22px;font-weight:700;color:white'>{pct}%</div>
+                <div style='font-size:11px;color:white'>Cumplimiento</div>
+            </div>
+        </div>"""
+
+        # ── Leyenda ───────────────────────────────────────────────────────────
+        leyenda = f"""
+        <div style='display:flex;gap:10px;margin-bottom:12px;font-size:11px;flex-wrap:wrap'>
+            <span style='background:#C8E6C9;color:#1B5E20;padding:3px 8px;border-radius:4px;font-weight:600'>
+                🟢 Óptimo ≥ {ESTANDAR}
+            </span>
+            <span style='background:#FFF9C4;color:#856D00;padding:3px 8px;border-radius:4px;font-weight:600'>
+                🟡 En riesgo {UMBRAL_RIESGO}–{ESTANDAR-0.01}
+            </span>
+            <span style='background:#FFCDD2;color:#B71C1C;padding:3px 8px;border-radius:4px;font-weight:600'>
+                🔴 Bajo estándar &lt; {UMBRAL_RIESGO}
+            </span>
+            <span style='background:#E3F2FD;color:#1F4E79;padding:3px 8px;border-radius:4px;font-weight:600'>
+                📊 Prom. anual = columna azul
+            </span>
+            <span style='color:#555;padding:3px 8px'>
+                n/m = meses cumplidos / meses evaluados
+            </span>
         </div>"""
 
         # ── HTML completo ─────────────────────────────────────────────────────
+        periodos_txt = ", ".join(meses_col)
         html = f"""
         <html>
         <body style='margin:0;padding:0;background:#F5F7FA;font-family:Arial,sans-serif'>
-        <div style='max-width:640px;margin:0 auto;padding:24px 16px'>
+        <div style='max-width:800px;margin:0 auto;padding:20px 16px'>
 
-            <!-- Encabezado -->
-            <div style='background:#1F4E79;border-radius:10px 10px 0 0;padding:24px;text-align:center;margin-bottom:0'>
-                <h1 style='color:white;margin:0;font-size:20px'>⚠️ Alerta de Rendimiento Hora Médico</h1>
-                <p style='color:#B3D4F5;margin:6px 0 0 0;font-size:13px'>
-                    H. II Huancavelica &nbsp;·&nbsp; Grupo Ocupacional: MÉDICO
+            <div style='background:#1F4E79;border-radius:10px 10px 0 0;padding:20px 24px'>
+                <h1 style='color:white;margin:0;font-size:18px'>
+                    📊 Informe de Rendimiento Hora Médico
+                </h1>
+                <p style='color:#B3D4F5;margin:4px 0 0 0;font-size:12px'>
+                    H. II Huancavelica &nbsp;·&nbsp; Período: {periodos_txt} &nbsp;·&nbsp;
+                    Cálculo: ATE ÷ HRAS_PROG &nbsp;·&nbsp; Estándar: {ESTANDAR} atenc/hora
                 </p>
             </div>
 
-            <!-- Banda de alerta -->
-            <div style='background:#FF6B6B;padding:10px;text-align:center;margin-bottom:20px'>
-                <span style='color:white;font-weight:700;font-size:14px'>
-                    {total_casos} médico(s) con rendimiento bajo {UMBRAL_RIESGO} atenciones/hora
-                </span>
+            <div style='background:white;border:1px solid #e0e0e0;border-top:none;
+                        border-radius:0 0 10px 10px;padding:20px;margin-bottom:0'>
+                {kpis_html}
+                {leyenda}
+
+                <div style='overflow-x:auto'>
+                <table style='border-collapse:collapse;width:100%;font-family:Arial,sans-serif'>
+                    <thead>
+                        <tr>
+                            <th style='padding:7px 10px;background:#1F4E79;color:white;
+                                       font-size:11px;text-align:left;border:1px solid #1F4E79;
+                                       white-space:nowrap'>Médico</th>
+                            {ths_mes}
+                            <th style='padding:7px 8px;background:#2196F3;color:white;font-size:11px;
+                                       text-align:center;border:1px solid #1565C0;white-space:nowrap;
+                                       border-left:2px solid #90CAF9'>Prom.<br>Anual</th>
+                            <th style='padding:7px 8px;background:#37474F;color:white;font-size:11px;
+                                       text-align:center;border:1px solid #263238;white-space:nowrap'>
+                                Meses<br>OK</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {filas_html}
+                    </tbody>
+                </table>
+                </div>
+
+                <p style='color:#aaa;font-size:10px;margin-top:16px;text-align:center'>
+                    Nombres mostrados como iniciales · Generado automáticamente por el Dashboard de Rendimiento
+                </p>
             </div>
-
-            {resumen_html}
-
-            <!-- Secciones por servicio -->
-            <h2 style='color:#1F4E79;font-size:15px;margin:20px 0 12px 0'>
-                📋 Detalle por servicio y período
-            </h2>
-            {secciones_html}
-
-            <!-- Pie -->
-            <div style='text-align:center;color:#aaa;font-size:11px;margin-top:24px;padding-top:16px;
-                        border-top:1px solid #e0e0e0'>
-                Cálculo: ATE ÷ HRAS_PROG &nbsp;·&nbsp;
-                Nombres mostrados como iniciales (protección de datos) &nbsp;·&nbsp;
-                Generado automáticamente por el Dashboard de Rendimiento
-            </div>
-
         </div>
         </body></html>"""
 
         resend.Emails.send({
             "from":    "alertas@resend.dev",
             "to":      [email_destino],
-            "subject": f"⚠️ Alerta rendimiento médico — {total_casos} caso(s) en {len(meses_incluidos)} mes(es)",
+            "subject": f"📊 Rendimiento Hora Médico — {periodos_txt} · {pct}% cumplimiento",
             "html":    html,
         })
         return True
@@ -336,151 +369,6 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
     except Exception as e:
         st.error(f"Error al enviar email: {e}")
         return False
-
-
-# ── CARGA Y PROCESAMIENTO DE DATOS ────────────────────────────────────────────
-
-@st.cache_data(ttl=600)  # Cachea 10 minutos para no sobrecargar Supabase
-def cargar_datos() -> pd.DataFrame:
-    """
-    Consulta la tabla de Supabase via API REST directa (httpx),
-    filtra en Python por grupo ocupacional y subactividades,
-    calcula el rendimiento (ATE / HRAS_PROG) y anonimiza nombres.
-    """
-    url   = st.secrets["SUPABASE_URL"]
-    key   = st.secrets["SUPABASE_KEY"]
-    tabla = st.secrets.get("SUPABASE_TABLE", "hras_efectivas")
-
-    # Headers requeridos por la API REST de Supabase (PostgREST)
-    headers = {
-        "apikey":        key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type":  "application/json",
-    }
-
-    # Columnas a traer — sin MES (no existe), se deriva de PERIODO
-    columnas = "PERIODO,SERVICIO,PROFESIONAL,SUBACTIVIDAD,ATE,HRAS_PROG,GRPO_OCUPACIONAL"
-
-    # Paginación con offset/limit via API REST de PostgREST
-    todos  = []
-    offset = 0
-    batch  = 1000
-
-    while True:
-        # PostgREST requiere el filtro como parámetro separado con el nombre exacto de columna
-        respuesta = httpx.get(
-            f"{url}/rest/v1/{tabla}",
-            headers={
-                **headers,
-                "Range-Unit": "items",
-                "Range": f"{offset}-{offset + batch - 1}",
-            },
-            params={
-                "select": columnas,
-                "GRPO_OCUPACIONAL": f"eq.{GRUPO}",
-                "limit":  str(batch),
-                "offset": str(offset),
-            },
-            timeout=30,
-        )
-        respuesta.raise_for_status()
-        filas = respuesta.json()
-        # Si la respuesta no es lista (error de PostgREST), salir
-        if not isinstance(filas, list):
-            break
-
-        if not filas:
-            break
-        todos.extend(filas)
-        if len(filas) < batch:
-            break
-        offset += batch
-
-    if not todos:
-        return pd.DataFrame()
-
-    datos = pd.DataFrame(todos)
-
-    # Filtrar subactividades en Python
-    datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
-
-    if datos.empty:
-        return pd.DataFrame()
-
-    # Derivar columna MES desde PERIODO (formato dd/mm/yyyy o yyyy-mm-dd)
-    MAPA_MESES = {
-        1: "Enero",     2: "Febrero",    3: "Marzo",
-        4: "Abril",     5: "Mayo",       6: "Junio",
-        7: "Julio",     8: "Agosto",     9: "Setiembre",
-        10: "Octubre",  11: "Noviembre", 12: "Diciembre"
-    }
-    fechas       = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce")
-    datos["MES"] = fechas.dt.month.map(MAPA_MESES)
-
-    # Convertir columnas numéricas
-    datos["ATE"]       = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
-    datos["HRAS_PROG"] = pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
-
-    # Anonimizar nombres antes de agrupar
-    datos["PROFESIONAL"] = datos["PROFESIONAL"].apply(anonimizar_nombre)
-
-    # Agrupar por mes, servicio, médico y subactividad
-    grp = datos.groupby(
-        ["MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD"], as_index=False
-    ).agg(
-        ATENCIONES=("ATE",       "sum"),
-        HORAS_PROG=("HRAS_PROG", "sum"),
-    )
-
-    # Orden cronológico de meses
-    meses_presentes = [m for m in MESES_ORDER if m in grp["MES"].values]
-    grp["MES"] = pd.Categorical(grp["MES"], categories=meses_presentes, ordered=True)
-    grp.sort_values(["MES", "SERVICIO", "PROFESIONAL"], inplace=True)
-
-    # Calcular rendimiento — NaN si HRAS_PROG = 0
-    grp["RENDIMIENTO"] = np.where(
-        grp["HORAS_PROG"] > 0,
-        (grp["ATENCIONES"] / grp["HORAS_PROG"]).round(2),
-        np.nan,
-    )
-
-    # Columnas auxiliares para gráficos
-    grp["SEMAFORO"] = grp["RENDIMIENTO"].apply(semaforo)
-    grp["COLOR"]    = grp["RENDIMIENTO"].apply(color_semaforo)
-
-    return grp
-
-
-def exportar_excel(df: pd.DataFrame) -> bytes:
-    """
-    Genera un Excel en memoria con semáforo visual en la columna RENDIMIENTO.
-    Listo para descarga desde el dashboard sin guardar archivos en disco.
-    """
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.drop(columns=["COLOR"], errors="ignore").to_excel(
-            writer, index=False, sheet_name="Rendimiento"
-        )
-        wb  = writer.book
-        ws  = writer.sheets["Rendimiento"]
-
-        # Formatos de celda para cada nivel del semáforo
-        fmt_v = wb.add_format({"bg_color": "#70AD47", "bold": True,
-                                "num_format": "0.00", "border": 1})
-        fmt_a = wb.add_format({"bg_color": "#FFD966", "bold": True,
-                                "num_format": "0.00", "border": 1})
-        fmt_r = wb.add_format({"bg_color": "#FF6B6B", "bold": True,
-                                "num_format": "0.00", "border": 1,
-                                "font_color": "white"})
-
-        col_rend = df.columns.get_loc("RENDIMIENTO")
-        for row_num, val in enumerate(df["RENDIMIENTO"], start=1):
-            if pd.isna(val):
-                continue
-            fmt = fmt_v if val >= ESTANDAR else (fmt_a if val >= UMBRAL_RIESGO else fmt_r)
-            ws.write(row_num, col_rend, val, fmt)
-
-    return buf.getvalue()
 
 
 # ── CONFIGURACIÓN DE PÁGINA ───────────────────────────────────────────────────
