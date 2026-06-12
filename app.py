@@ -4,7 +4,7 @@
 # Descripción : Evalúa el rendimiento hora médico por mes, servicio y médico
 # Cálculo     : ATE / HRAS_PROG  (atenciones / horas programadas)
 # Estándar    : 5 atenciones por hora
-# Semáforo    : Verde >= 5.0 | Amarillo 4.5–4.99 | Rojo < 4.5
+# Semáforo    : Verde >= 5.0 | Amarillo 4.9–4.99 | Rojo < 4.9
 # Grupo       : MEDICO
 # Subactiv.   : CONSULTA MEDICA | ATENCION ADULTO MAYOR FRAGIL
 # Privacidad  : Nombres mostrados solo como iniciales (J.G.P.)
@@ -106,6 +106,118 @@ def color_semaforo(val) -> str:
     }[semaforo(val)]
 
 
+# ── TENDENCIA POR MÉDICO ──────────────────────────────────────────────────────
+
+def calcular_tendencia(grp: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula la tendencia de rendimiento por médico comparando
+    el último mes disponible vs el mes anterior.
+    Retorna un DataFrame con columna TENDENCIA: '↑', '↓' o '→'
+    """
+    # Obtener los dos últimos meses con datos
+    meses_disp = grp["MES"].cat.categories.tolist()
+    if len(meses_disp) < 2:
+        # Si solo hay un mes no hay tendencia
+        grp["TENDENCIA"] = "—"
+        grp["TEND_DELTA"] = 0.0
+        return grp
+
+    mes_actual   = meses_disp[-1]
+    mes_anterior = meses_disp[-2]
+
+    # Rendimiento acumulado por médico en cada mes
+    def rend_mes(mes):
+        dm = grp[grp["MES"] == mes].groupby("PROFESIONAL", as_index=False).agg(
+            ATE=("ATENCIONES", "sum"), HRS=("HORAS_PROG", "sum")
+        )
+        dm["REND"] = np.where(dm["HRS"] > 0, (dm["ATE"] / dm["HRS"]).round(2), np.nan)
+        return dm.set_index("PROFESIONAL")["REND"]
+
+    r_actual   = rend_mes(mes_actual)
+    r_anterior = rend_mes(mes_anterior)
+
+    # Unir y calcular delta
+    tend = pd.DataFrame({"ACTUAL": r_actual, "ANTERIOR": r_anterior})
+    tend["DELTA"] = tend["ACTUAL"] - tend["ANTERIOR"]
+    tend["TENDENCIA"] = tend["DELTA"].apply(
+        lambda d: "↑" if d > 0.05 else ("↓" if d < -0.05 else "→")
+    )
+    tend = tend.reset_index().rename(columns={"index": "PROFESIONAL", "DELTA": "TEND_DELTA"})
+
+    # Unir tendencia al DataFrame principal
+    grp = grp.merge(
+        tend[["PROFESIONAL", "TENDENCIA", "TEND_DELTA"]],
+        on="PROFESIONAL", how="left"
+    )
+    grp["TENDENCIA"]  = grp["TENDENCIA"].fillna("—")
+    grp["TEND_DELTA"] = grp["TEND_DELTA"].fillna(0.0)
+    return grp
+
+
+# ── ALERTAS POR EMAIL ─────────────────────────────────────────────────────────
+
+def enviar_alerta_email(df_bajo: pd.DataFrame, email_destino: str) -> bool:
+    """
+    Envía un email con la lista de médicos bajo el umbral de rendimiento
+    usando Resend. Requiere RESEND_API_KEY en los secrets de Streamlit.
+    Retorna True si el envío fue exitoso, False en caso contrario.
+    """
+    try:
+        resend.api_key = st.secrets["RESEND_API_KEY"]
+
+        # Construir tabla HTML con los médicos bajo el umbral
+        filas_html = ""
+        for _, r in df_bajo.iterrows():
+            color = "#FF6B6B" if r["RENDIMIENTO"] < UMBRAL_RIESGO else "#FFD966"
+            filas_html += f"""
+                <tr>
+                    <td style='padding:6px;border:1px solid #ddd'>{r['MES']}</td>
+                    <td style='padding:6px;border:1px solid #ddd'>{r['SERVICIO']}</td>
+                    <td style='padding:6px;border:1px solid #ddd'>{r['PROFESIONAL']}</td>
+                    <td style='padding:6px;border:1px solid #ddd'>{r['SUBACTIVIDAD']}</td>
+                    <td style='padding:6px;border:1px solid #ddd;background:{color};
+                               font-weight:bold;text-align:center'>
+                        {r['RENDIMIENTO']:.2f}
+                    </td>
+                </tr>"""
+
+        html = f"""
+        <html><body>
+        <h2 style='color:#1F4E79'>⚠️ Alerta de Rendimiento Hora Médico</h2>
+        <p>H. II Huancavelica — Los siguientes médicos tienen rendimiento
+        <strong>por debajo del umbral ({UMBRAL_RIESGO})</strong>:</p>
+        <table style='border-collapse:collapse;width:100%;font-family:Arial,sans-serif'>
+            <thead>
+                <tr style='background:#1F4E79;color:white'>
+                    <th style='padding:8px;border:1px solid #ddd'>Mes</th>
+                    <th style='padding:8px;border:1px solid #ddd'>Servicio</th>
+                    <th style='padding:8px;border:1px solid #ddd'>Médico</th>
+                    <th style='padding:8px;border:1px solid #ddd'>Subactividad</th>
+                    <th style='padding:8px;border:1px solid #ddd'>Rendimiento</th>
+                </tr>
+            </thead>
+            <tbody>{filas_html}</tbody>
+        </table>
+        <p style='color:#666;font-size:12px;margin-top:20px'>
+            Estándar: {ESTANDAR} atenciones/hora · Cálculo: ATE ÷ HRAS_PROG<br>
+            Dashboard: <a href='#'>Ver dashboard completo</a>
+        </p>
+        </body></html>
+        """
+
+        resend.Emails.send({
+            "from":    "alertas@resend.dev",
+            "to":      [email_destino],
+            "subject": f"⚠️ Alerta rendimiento médico — {len(df_bajo)} caso(s) bajo {UMBRAL_RIESGO}",
+            "html":    html,
+        })
+        return True
+
+    except Exception as e:
+        st.error(f"Error al enviar email: {e}")
+        return False
+
+
 # ── CARGA Y PROCESAMIENTO DE DATOS ────────────────────────────────────────────
 
 @st.cache_data(ttl=600)  # Cachea 10 minutos para no sobrecargar Supabase
@@ -134,23 +246,28 @@ def cargar_datos() -> pd.DataFrame:
     offset = 0
     batch  = 1000
 
-    import httpx
-
     while True:
-        params = {
-            "select": columnas,
-            "GRPO_OCUPACIONAL": f"eq.{GRUPO}",   # filtro grupo ocupacional
-            "limit":  str(batch),
-            "offset": str(offset),
-        }
+        # PostgREST requiere el filtro como parámetro separado con el nombre exacto de columna
         respuesta = httpx.get(
             f"{url}/rest/v1/{tabla}",
-            headers=headers,
-            params=params,
+            headers={
+                **headers,
+                "Range-Unit": "items",
+                "Range": f"{offset}-{offset + batch - 1}",
+            },
+            params={
+                "select": columnas,
+                "GRPO_OCUPACIONAL": f"eq.{GRUPO}",
+                "limit":  str(batch),
+                "offset": str(offset),
+            },
             timeout=30,
         )
         respuesta.raise_for_status()
         filas = respuesta.json()
+        # Si la respuesta no es lista (error de PostgREST), salir
+        if not isinstance(filas, list):
+            break
 
         if not filas:
             break
@@ -278,6 +395,9 @@ if grp.empty:
     )
     st.stop()
 
+# Calcular tendencia comparando último mes vs mes anterior
+grp = calcular_tendencia(grp)
+
 
 # ── FILTROS (PANEL LATERAL) ───────────────────────────────────────────────────
 
@@ -313,6 +433,31 @@ with st.sidebar:
     )
     st.markdown("---")
     st.caption("🔒 Nombres mostrados como iniciales para proteger datos personales.")
+
+    st.markdown("---")
+    st.header("📧 Alertas por email")
+    email_destino = st.text_input(
+        "Email destino",
+        placeholder="correo@ejemplo.com",
+        help="Recibirá la lista de médicos bajo el umbral de rendimiento"
+    )
+    if st.button("🚨 Enviar alerta de bajo rendimiento"):
+        if not email_destino:
+            st.warning("Ingresa un email destino.")
+        elif "RESEND_API_KEY" not in st.secrets:
+            st.error("Agrega RESEND_API_KEY en los Secrets de Streamlit Cloud.")
+        else:
+            # Filtrar médicos bajo el umbral en todos los meses
+            df_bajo = grp[grp["RENDIMIENTO"] < UMBRAL_RIESGO].copy()
+            if df_bajo.empty:
+                st.success("✅ Ningún médico está bajo el umbral. ¡Sin alertas!")
+            else:
+                with st.spinner("Enviando email..."):
+                    ok = enviar_alerta_email(df_bajo, email_destino)
+                if ok:
+                    st.success(f"✅ Alerta enviada a {email_destino} con {len(df_bajo)} caso(s).")
+                else:
+                    st.error("No se pudo enviar el email. Revisa la API key de Resend.")
 
 # Aplicar filtros seleccionados
 df = grp[
@@ -490,6 +635,15 @@ with tab3:
         med_df["HORAS_PROG"] > 0,
         (med_df["ATENCIONES"] / med_df["HORAS_PROG"]).round(2), np.nan
     )
+    # Unir tendencia al DataFrame de médicos
+    tend_med = grp[["PROFESIONAL","TENDENCIA","TEND_DELTA"]].drop_duplicates("PROFESIONAL")
+    med_df = med_df.merge(tend_med, on="PROFESIONAL", how="left")
+    med_df["TENDENCIA"]  = med_df["TENDENCIA"].fillna("—")
+    med_df["TEND_DELTA"] = med_df["TEND_DELTA"].fillna(0.0)
+    # Etiqueta combinada: rendimiento + tendencia
+    med_df["LABEL"] = med_df.apply(
+        lambda r: f"{r['RENDIMIENTO']:.2f} {r['TENDENCIA']}" if not pd.isna(r["RENDIMIENTO"]) else "S/D", axis=1
+    )
     med_df["COLOR"]    = med_df["RENDIMIENTO"].apply(color_semaforo)
     med_df["SEMAFORO"] = med_df["RENDIMIENTO"].apply(semaforo)
     med_df.sort_values("RENDIMIENTO", ascending=True, inplace=True)
@@ -503,8 +657,10 @@ with tab3:
             "Bajo estándar": COLOR_ROJO,
             "Sin dato":      COLOR_ND,
         },
-        hover_data={"SERVICIO": True, "ATENCIONES": True, "HORAS_PROG": True},
-        title="Rendimiento acumulado por médico (iniciales)",
+        hover_data={"SERVICIO": True, "ATENCIONES": True, "HORAS_PROG": True,
+                    "TENDENCIA": True, "TEND_DELTA": True},
+        text="LABEL",
+        title="Rendimiento acumulado por médico — con tendencia (↑ sube · ↓ baja · → estable)",
         labels={"RENDIMIENTO": "Atenciones/hora", "PROFESIONAL": "Médico"},
     )
     fig5.add_vline(x=ESTANDAR, line_dash="dash", line_color="#333",
@@ -539,6 +695,9 @@ with tab4:
     st.info("🔒 La columna 'Médico' muestra solo las iniciales del profesional.")
 
     tabla = df[[
+        "MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD",
+        "ATENCIONES", "HORAS_PROG", "RENDIMIENTO", "SEMAFORO", "TENDENCIA"
+    ]].copy() if "TENDENCIA" in df.columns else df[[
         "MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD",
         "ATENCIONES", "HORAS_PROG", "RENDIMIENTO", "SEMAFORO"
     ]].copy()
