@@ -79,14 +79,21 @@ def conectar_supabase() -> Client:
 
 def anonimizar_nombre(nombre_completo: str) -> str:
     """
-    Convierte un nombre completo en iniciales para proteger datos personales.
-    Ejemplo: "GARCIA PEREZ JOSE LUIS" -> "G.P.J.L."
+    Formatea el nombre para proteger datos personales:
+    Primer apellido completo + iniciales del resto.
+    Formato de entrada: "APELLIDO1 APELLIDO2 NOMBRE1 NOMBRE2"
+    Ejemplo: "GARCIA PEREZ JOSE LUIS" -> "GARCIA P.J.L."
     Retorna "S/N" si el nombre está vacío o es nulo.
     """
     if pd.isna(nombre_completo) or str(nombre_completo).strip() == "":
         return "S/N"
     partes = str(nombre_completo).strip().split()
-    return ".".join(p[0].upper() for p in partes if p) + "."
+    if len(partes) == 1:
+        return partes[0]
+    # Primer apellido completo + iniciales del resto
+    primer_apellido = partes[0].upper()
+    iniciales = ".".join(p[0].upper() for p in partes[1:] if p) + "."
+    return f"{primer_apellido} {iniciales}"
 
 
 # ── FUNCIONES DE SEMÁFORO ─────────────────────────────────────────────────────
@@ -213,13 +220,43 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
         prev_srv    = None
         total_med   = len(medicos_srv)
         cumplen     = 0
+        srv_ate_mes = {m: 0.0 for m in meses_col}
+        srv_hrs_mes = {m: 0.0 for m in meses_col}
+        srv_ate_tot = 0.0
+        srv_hrs_tot = 0.0
+
+        def flush_total_servicio(srv_nombre):
+            """Fila de promedio total del servicio."""
+            celdas_tot = ""
+            for m in meses_col:
+                v = round(srv_ate_mes[m]/srv_hrs_mes[m],2) if srv_hrs_mes[m]>0 else np.nan
+                b,t = bg(v); txt = f"{v:.2f}" if not pd.isna(v) else "—"
+                celdas_tot += (f"<td style='padding:5px 8px;border:1px solid #ccc;background:{b};"
+                               f"color:{t};font-weight:700;text-align:center;font-size:12px'>{txt}</td>")
+            prom_s = round(srv_ate_tot/srv_hrs_tot,2) if srv_hrs_tot>0 else np.nan
+            b_p,t_p = bg(prom_s); txt_p = f"{prom_s:.2f}" if not pd.isna(prom_s) else "—"
+            return f"""
+            <tr style='border-top:2px solid #90CAF9'>
+                <td style='padding:5px 10px;border:1px solid #ccc;font-size:12px;
+                           font-weight:700;color:#1565C0;background:#E3F2FD'>
+                    📊 Promedio {srv_nombre}</td>
+                {celdas_tot}
+                <td style='padding:5px 8px;border:1px solid #ccc;background:{b_p};
+                           color:{t_p};font-weight:700;text-align:center;font-size:12px;
+                           border-left:2px solid #90CAF9'>{txt_p}</td>
+            </tr>"""
 
         for med, srv in medicos_srv:
-            # Fila separadora de servicio
             if srv != prev_srv:
+                if prev_srv is not None:
+                    filas_html += flush_total_servicio(prev_srv)
+                srv_ate_mes = {m: 0.0 for m in meses_col}
+                srv_hrs_mes = {m: 0.0 for m in meses_col}
+                srv_ate_tot = 0.0
+                srv_hrs_tot = 0.0
                 filas_html += f"""
                 <tr>
-                    <td colspan='{n_meses + 3}'
+                    <td colspan='{n_meses + 2}'
                         style='background:#1F4E79;color:white;font-weight:700;
                                font-size:12px;padding:6px 10px;letter-spacing:.04em'>
                         🏥 {srv}
@@ -227,20 +264,21 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
                 </tr>"""
                 prev_srv = srv
 
-            # Rendimientos por mes
             rends = {}
             for mes in meses_col:
                 fila = pivot[(pivot["PROFESIONAL"]==med) & (pivot["MES"]==mes)]
-                rends[mes] = fila["REND"].values[0] if not fila.empty else np.nan
+                if not fila.empty:
+                    rends[mes]       = fila["REND"].values[0]
+                    srv_ate_mes[mes]+= fila["ATE"].values[0]
+                    srv_hrs_mes[mes]+= fila["HRS"].values[0]
+                    srv_ate_tot     += fila["ATE"].values[0]
+                    srv_hrs_tot     += fila["HRS"].values[0]
+                else:
+                    rends[mes] = np.nan
 
             prom = prom_dict.get(med, np.nan)
-            meses_ok = sum(1 for v in rends.values() if not pd.isna(v) and v >= ESTANDAR)
             if not pd.isna(prom) and prom >= ESTANDAR:
                 cumplen += 1
-
-            # Celda de cumplimiento n/total meses
-            cum_color = "#C8E6C9" if meses_ok == n_meses else ("#FFF9C4" if meses_ok > 0 else "#FFCDD2")
-            cum_txt_c = "#1B5E20" if meses_ok == n_meses else ("#856D00" if meses_ok > 0 else "#B71C1C")
 
             celdas_mes = "".join(cell(rends[m]) for m in meses_col)
             filas_html += f"""
@@ -249,11 +287,11 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
                            white-space:nowrap;font-weight:600;color:#1F4E79'>{med}</td>
                 {celdas_mes}
                 {prom_cell(prom)}
-                <td style='padding:5px 8px;border:1px solid #e0e0e0;background:{cum_color};
-                           color:{cum_txt_c};font-weight:700;text-align:center;font-size:12px'>
-                    {meses_ok}/{n_meses}
-                </td>
             </tr>"""
+
+        if prev_srv is not None:
+            filas_html += flush_total_servicio(prev_srv)
+
 
         # ── Encabezados de columna ────────────────────────────────────────────
         ths_mes = "".join(
@@ -340,9 +378,7 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
                             <th style='padding:7px 8px;background:#2196F3;color:white;font-size:11px;
                                        text-align:center;border:1px solid #1565C0;white-space:nowrap;
                                        border-left:2px solid #90CAF9'>Prom.<br>Anual</th>
-                            <th style='padding:7px 8px;background:#37474F;color:white;font-size:11px;
-                                       text-align:center;border:1px solid #263238;white-space:nowrap'>
-                                Meses<br>OK</th>
+
                         </tr>
                     </thead>
                     <tbody>
