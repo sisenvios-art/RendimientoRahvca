@@ -371,6 +371,84 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
         return False
 
 
+# ── CARGA Y PROCESAMIENTO DE DATOS ────────────────────────────────────────────
+
+@st.cache_data(ttl=600)
+def cargar_datos() -> pd.DataFrame:
+    """Consulta Supabase via REST, filtra, calcula rendimiento y anonimiza."""
+    url   = st.secrets["SUPABASE_URL"]
+    key   = st.secrets["SUPABASE_KEY"]
+    tabla = st.secrets.get("SUPABASE_TABLE", "vw_horas_efectivas")
+    headers = {
+        "apikey": key, "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    columnas = "PERIODO,SERVICIO,PROFESIONAL,SUBACTIVIDAD,ATE,HRAS_PROG,GRPO_OCUPACIONAL"
+    todos, offset, batch = [], 0, 1000
+    while True:
+        r = httpx.get(
+            f"{url}/rest/v1/{tabla}",
+            headers={**headers, "Range-Unit":"items", "Range":f"{offset}-{offset+batch-1}"},
+            params={"select":columnas,"GRPO_OCUPACIONAL":f"eq.{GRUPO}","limit":str(batch),"offset":str(offset)},
+            timeout=30,
+        )
+        r.raise_for_status()
+        filas = r.json()
+        if not isinstance(filas, list) or not filas:
+            break
+        todos.extend(filas)
+        if len(filas) < batch:
+            break
+        offset += batch
+
+    if not todos:
+        return pd.DataFrame()
+
+    datos = pd.DataFrame(todos)
+    datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
+    if datos.empty:
+        return pd.DataFrame()
+
+    MAPA_MESES = {
+        1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
+        7:"Julio",8:"Agosto",9:"Setiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"
+    }
+    datos["MES"]      = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce").dt.month.map(MAPA_MESES)
+    datos["ATE"]      = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
+    datos["HRAS_PROG"]= pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
+    datos["PROFESIONAL"] = datos["PROFESIONAL"].apply(anonimizar_nombre)
+
+    grp = datos.groupby(["MES","SERVICIO","PROFESIONAL","SUBACTIVIDAD"], as_index=False).agg(
+        ATENCIONES=("ATE","sum"), HORAS_PROG=("HRAS_PROG","sum")
+    )
+    meses_pres = [m for m in MESES_ORDER if m in grp["MES"].values]
+    grp["MES"] = pd.Categorical(grp["MES"], categories=meses_pres, ordered=True)
+    grp.sort_values(["MES","SERVICIO","PROFESIONAL"], inplace=True)
+    grp["RENDIMIENTO"] = np.where(grp["HORAS_PROG"]>0,
+        (grp["ATENCIONES"]/grp["HORAS_PROG"]).round(2), np.nan)
+    grp["SEMAFORO"] = grp["RENDIMIENTO"].apply(semaforo)
+    grp["COLOR"]    = grp["RENDIMIENTO"].apply(color_semaforo)
+    return grp
+
+
+def exportar_excel(df: pd.DataFrame) -> bytes:
+    """Genera Excel en memoria con semáforo visual en columna RENDIMIENTO."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.drop(columns=["COLOR"], errors="ignore").to_excel(writer, index=False, sheet_name="Rendimiento")
+        wb  = writer.book
+        ws  = writer.sheets["Rendimiento"]
+        fmt_v = wb.add_format({"bg_color":"#70AD47","bold":True,"num_format":"0.00","border":1})
+        fmt_a = wb.add_format({"bg_color":"#FFD966","bold":True,"num_format":"0.00","border":1})
+        fmt_r = wb.add_format({"bg_color":"#FF6B6B","bold":True,"num_format":"0.00","border":1,"font_color":"white"})
+        col_rend = df.columns.get_loc("RENDIMIENTO")
+        for i, val in enumerate(df["RENDIMIENTO"], start=1):
+            if pd.isna(val): continue
+            ws.write(i, col_rend, val,
+                     fmt_v if val>=ESTANDAR else (fmt_a if val>=UMBRAL_RIESGO else fmt_r))
+    return buf.getvalue()
+
+
 # ── CONFIGURACIÓN DE PÁGINA ───────────────────────────────────────────────────
 
 st.set_page_config(
