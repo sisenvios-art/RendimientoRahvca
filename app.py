@@ -548,19 +548,26 @@ with st.sidebar:
         elif "RESEND_API_KEY" not in st.secrets:
             st.error("Agrega RESEND_API_KEY en los Secrets de Streamlit Cloud.")
         else:
-            # Filtrar por meses y servicios seleccionados en la sección de alertas
-            df_bajo = grp[
+            # Filtrar grp completo por los meses y servicios seleccionados para la alerta
+            grp_alerta = grp[
                 grp["MES"].isin(alerta_meses) &
-                grp["SERVICIO"].isin(alerta_servicios) &
-                (grp["RENDIMIENTO"] < UMBRAL_RIESGO)
+                grp["SERVICIO"].isin(alerta_servicios)
             ].copy()
-            if df_bajo.empty:
+
+            # Casos bajo el umbral dentro del mismo filtro
+            df_bajo = grp_alerta[grp_alerta["RENDIMIENTO"] < UMBRAL_RIESGO].copy()
+
+            if grp_alerta.empty:
+                st.warning("No hay datos para los servicios y meses seleccionados.")
+            elif df_bajo.empty:
                 st.success("✅ Ningún médico está bajo el umbral en el período y servicios seleccionados.")
             else:
                 with st.spinner("Enviando email..."):
-                    ok = enviar_alerta_email(df_bajo, grp, email_destino)
+                    # grp_alerta contiene TODOS los médicos del filtro (no solo los de bajo rendimiento)
+                    # para que la tabla matricial muestre el panorama completo del servicio
+                    ok = enviar_alerta_email(df_bajo, grp_alerta, email_destino)
                 if ok:
-                    st.success(f"✅ Alerta enviada a {email_destino} — {len(df_bajo)} caso(s) en {len(alerta_meses)} mes(es) y {len(alerta_servicios)} servicio(s).")
+                    st.success(f"✅ Informe enviado a {email_destino} — {len(alerta_servicios)} servicio(s), {len(alerta_meses)} mes(es).")
                 else:
                     st.error("No se pudo enviar el email. Revisa la API key de Resend.")
 
