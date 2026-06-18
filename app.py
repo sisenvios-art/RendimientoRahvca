@@ -432,7 +432,7 @@ def cargar_datos() -> pd.DataFrame:
     resp = httpx.post(
         f"{url}/storage/v1/object/list/{bucket}",
         headers={**headers, "Content-Type": "application/json"},
-        json={"limit": 100, "offset": 0},
+        json={"limit": 100, "offset": 0, "prefix": ""},
         timeout=30,
     )
     if resp.status_code != 200:
@@ -964,7 +964,7 @@ with tab5:
         resp = httpx.post(
             f"{url}/storage/v1/object/list/{bucket}",
             headers={**headers, "Content-Type": "application/json"},
-            json={"limit": 100, "offset": 0},
+            json={"limit": 100, "offset": 0, "prefix": ""},
             timeout=15,
         )
         if resp.status_code == 200:
