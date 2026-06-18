@@ -409,61 +409,120 @@ def enviar_alerta_email(df_bajo: pd.DataFrame, grp_completo: pd.DataFrame, email
 
 # ── CARGA Y PROCESAMIENTO DE DATOS ────────────────────────────────────────────
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)  # Cachea 5 minutos
 def cargar_datos() -> pd.DataFrame:
-    """Consulta Supabase via REST, filtra, calcula rendimiento y anonimiza."""
-    url   = st.secrets["SUPABASE_URL"]
-    key   = st.secrets["SUPABASE_KEY"]
-    tabla = st.secrets.get("SUPABASE_TABLE", "vw_horas_efectivas")
-    headers = {
-        "apikey": key, "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    columnas = "PERIODO,SERVICIO,PROFESIONAL,SUBACTIVIDAD,ATE,HRAS_PROG,GRPO_OCUPACIONAL"
-    todos, offset, batch = [], 0, 1000
-    while True:
-        r = httpx.get(
-            f"{url}/rest/v1/{tabla}",
-            headers={**headers, "Range-Unit":"items", "Range":f"{offset}-{offset+batch-1}"},
-            params={"select":columnas,"GRPO_OCUPACIONAL":f"eq.{GRUPO}","limit":str(batch),"offset":str(offset)},
-            timeout=30,
-        )
-        r.raise_for_status()
-        filas = r.json()
-        if not isinstance(filas, list) or not filas:
-            break
-        todos.extend(filas)
-        if len(filas) < batch:
-            break
-        offset += batch
+    """
+    Lee todos los archivos TXT/CSV del bucket csv-uploads en Supabase Storage,
+    filtra por grupo ocupacional y subactividades, calcula el rendimiento
+    (ATE / HRAS_PROG) y anonimiza nombres.
+    El mes se deriva automáticamente desde la columna PERIODO de cada archivo.
+    Si hay varios archivos del mismo mes (ej: acumulativos), se combinan y
+    el resultado final refleja el más completo disponible.
+    """
+    url    = st.secrets["SUPABASE_URL"]
+    key    = st.secrets["SUPABASE_KEY"]
+    bucket = st.secrets.get("SUPABASE_BUCKET", "csv-uploads")
 
-    if not todos:
+    headers = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+    }
+
+    # ── 1. Listar archivos en el bucket ───────────────────────────────────────
+    resp = httpx.get(
+        f"{url}/storage/v1/object/list/{bucket}",
+        headers=headers,
+        json={"limit": 100, "offset": 0},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        st.error(f"No se pudo listar el bucket '{bucket}': {resp.text[:200]}")
         return pd.DataFrame()
 
-    datos = pd.DataFrame(todos)
-    datos = datos[datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES)].copy()
+    archivos = [f["name"] for f in resp.json() if f.get("name")]
+    if not archivos:
+        st.warning(f"El bucket '{bucket}' está vacío. Sube los archivos TXT/CSV primero.")
+        return pd.DataFrame()
+
+    # ── 2. Descargar y leer cada archivo ─────────────────────────────────────
+    frames = []
+    for nombre in archivos:
+        r = httpx.get(
+            f"{url}/storage/v1/object/{bucket}/{nombre}",
+            headers=headers,
+            timeout=60,
+        )
+        if r.status_code != 200:
+            st.warning(f"No se pudo descargar: {nombre}")
+            continue
+        try:
+            contenido    = r.content.decode("utf-8", errors="replace")
+            primera_linea = contenido.split("\n")[0]
+            sep = "|" if "|" in primera_linea else ","
+            df  = pd.read_csv(io.StringIO(contenido), sep=sep, low_memory=False)
+            frames.append(df)
+        except Exception as e:
+            st.warning(f"Error al leer {nombre}: {e}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    # ── 3. Unir todos los archivos ────────────────────────────────────────────
+    datos = pd.concat(frames, ignore_index=True)
+
+    # ── 4. Filtrar grupo ocupacional y subactividades ─────────────────────────
+    datos = datos[
+        (datos["GRPO_OCUPACIONAL"] == GRUPO) &
+        (datos["SUBACTIVIDAD"].isin(SUBACTIVIDADES))
+    ].copy()
+
     if datos.empty:
         return pd.DataFrame()
 
+    # ── 5. Derivar MES desde PERIODO (dd/mm/yyyy o yyyy-mm-dd) ───────────────
     MAPA_MESES = {
-        1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
-        7:"Julio",8:"Agosto",9:"Setiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"
+        1:"Enero",  2:"Febrero",  3:"Marzo",    4:"Abril",
+        5:"Mayo",   6:"Junio",    7:"Julio",     8:"Agosto",
+        9:"Setiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"
     }
-    datos["MES"]      = pd.to_datetime(datos["PERIODO"], dayfirst=True, errors="coerce").dt.month.map(MAPA_MESES)
-    datos["ATE"]      = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
-    datos["HRAS_PROG"]= pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
+    datos["MES"] = pd.to_datetime(
+        datos["PERIODO"], dayfirst=True, errors="coerce"
+    ).dt.month.map(MAPA_MESES)
+
+    # ── 6. Convertir columnas numéricas ───────────────────────────────────────
+    datos["ATE"]       = pd.to_numeric(datos["ATE"],       errors="coerce").fillna(0)
+    datos["HRAS_PROG"] = pd.to_numeric(datos["HRAS_PROG"], errors="coerce").fillna(0)
+
+    # ── 7. Anonimizar nombres ─────────────────────────────────────────────────
     datos["PROFESIONAL"] = datos["PROFESIONAL"].apply(anonimizar_nombre)
 
-    grp = datos.groupby(["MES","SERVICIO","PROFESIONAL","SUBACTIVIDAD"], as_index=False).agg(
-        ATENCIONES=("ATE","sum"), HORAS_PROG=("HRAS_PROG","sum")
+    # ── 8. Agrupar por mes, servicio, médico y subactividad ───────────────────
+    # La agrupación con sum() elimina duplicados naturalmente:
+    # si el mismo registro aparece dos veces (por archivos acumulativos
+    # que se solapan), se sumarán — por eso se recomienda reemplazar el
+    # archivo anterior por el nuevo acumulado en lugar de tener ambos.
+    grp = datos.groupby(
+        ["MES", "SERVICIO", "PROFESIONAL", "SUBACTIVIDAD"], as_index=False
+    ).agg(
+        ATENCIONES=("ATE",       "sum"),
+        HORAS_PROG=("HRAS_PROG", "sum"),
     )
+
+    # Orden cronológico
     meses_pres = [m for m in MESES_ORDER if m in grp["MES"].values]
     grp["MES"] = pd.Categorical(grp["MES"], categories=meses_pres, ordered=True)
-    grp.sort_values(["MES","SERVICIO","PROFESIONAL"], inplace=True)
-    grp["RENDIMIENTO"] = np.where(grp["HORAS_PROG"]>0,
-        (grp["ATENCIONES"]/grp["HORAS_PROG"]).round(2), np.nan)
+    grp.sort_values(["MES", "SERVICIO", "PROFESIONAL"], inplace=True)
+
+    # ── 9. Calcular rendimiento ───────────────────────────────────────────────
+    grp["RENDIMIENTO"] = np.where(
+        grp["HORAS_PROG"] > 0,
+        (grp["ATENCIONES"] / grp["HORAS_PROG"]).round(2),
+        np.nan,
+    )
+
     grp["SEMAFORO"] = grp["RENDIMIENTO"].apply(semaforo)
     grp["COLOR"]    = grp["RENDIMIENTO"].apply(color_semaforo)
+
     return grp
 
 
@@ -641,11 +700,12 @@ st.markdown("---")
 
 # ── TABS DE CONTENIDO ─────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 Evolución mensual",
     "🏢 Por servicio",
     "👨‍⚕️ Por médico",
     "📋 Tabla detalle",
+    "📤 Cargar datos",
 ])
 
 
@@ -880,3 +940,129 @@ with tab4:
             "rendimiento_medico.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+
+# ── TAB 5: Cargar datos ────────────────────────────────────────────────────────
+with tab5:
+
+    st.subheader("📤 Gestión de archivos en Supabase Storage")
+    st.caption(
+        "Sube aquí los archivos TXT de horas efectivas. "
+        "El dashboard los leerá automáticamente al recargar. "
+        "Si un mes tiene datos acumulativos, **reemplaza el archivo anterior** "
+        "con el nuevo — no mantengas ambos en el bucket."
+    )
+
+    url    = st.secrets["SUPABASE_URL"]
+    key    = st.secrets["SUPABASE_KEY"]
+    bucket = st.secrets.get("SUPABASE_BUCKET", "csv-uploads")
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+
+    # ── Lista de archivos actuales en el bucket ────────────────────────────────
+    st.markdown("**📁 Archivos actuales en el bucket:**")
+    try:
+        resp = httpx.post(
+            f"{url}/storage/v1/object/list/{bucket}",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"limit": 100, "offset": 0},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            archivos = resp.json()
+            if archivos:
+                df_archivos = pd.DataFrame([{
+                    "Archivo": f["name"],
+                    "Tamaño (KB)": round(f.get("metadata", {}).get("size", 0) / 1024, 1),
+                    "Última actualización": f.get("updated_at", "—")[:10] if f.get("updated_at") else "—",
+                } for f in archivos if f.get("name")])
+                st.dataframe(df_archivos, use_container_width=True, hide_index=True)
+            else:
+                st.info("El bucket está vacío. Sube el primer archivo abajo.")
+        else:
+            st.warning(f"No se pudo listar el bucket: {resp.text[:150]}")
+    except Exception as e:
+        st.warning(f"Error al listar archivos: {e}")
+
+    st.markdown("---")
+
+    # ── Subir nuevo archivo ────────────────────────────────────────────────────
+    st.markdown("**☁️ Subir o reemplazar archivo:**")
+    archivo_subido = st.file_uploader(
+        "Selecciona el archivo TXT/CSV",
+        type=["csv", "txt"],
+        key="uploader_storage",
+    )
+
+    if archivo_subido is not None:
+        # Vista previa
+        try:
+            preview = pd.read_csv(archivo_subido, sep="|", low_memory=False, nrows=3)
+            st.write("Vista previa (3 filas):")
+            st.dataframe(preview, use_container_width=True)
+            archivo_subido.seek(0)
+        except Exception:
+            archivo_subido.seek(0)
+
+        nombre_destino = st.text_input(
+            "Nombre del archivo en el bucket",
+            value=archivo_subido.name,
+            help="Puedes cambiarlo. Si ya existe un archivo con ese nombre, se reemplazará.",
+        )
+
+        if st.button("☁️ Subir al bucket", use_container_width=True):
+            try:
+                archivo_subido.seek(0)
+                contenido = archivo_subido.read()
+                with st.spinner(f"Subiendo {nombre_destino}..."):
+                    r = httpx.post(
+                        f"{url}/storage/v1/object/{bucket}/{nombre_destino}",
+                        headers={
+                            **headers,
+                            "Content-Type": "text/plain",
+                            "x-upsert": "true",  # reemplaza si ya existe
+                        },
+                        content=contenido,
+                        timeout=60,
+                    )
+                if r.status_code in (200, 201):
+                    st.success(f"✅ Archivo subido: **{nombre_destino}**")
+                    st.cache_data.clear()
+                    st.info("Caché limpiado. Recarga el dashboard para ver los datos actualizados.")
+                else:
+                    st.error(f"Error al subir ({r.status_code}): {r.text[:300]}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("---")
+
+    # ── Eliminar archivo del bucket ────────────────────────────────────────────
+    st.markdown("**🗑️ Eliminar archivo del bucket:**")
+    nombre_eliminar = st.text_input(
+        "Nombre exacto del archivo a eliminar",
+        placeholder="342_20260101_20260131_HrasEfectivas.txt",
+        key="eliminar_nombre",
+    )
+    if st.button("🗑️ Eliminar archivo", type="secondary", use_container_width=True):
+        if not nombre_eliminar:
+            st.warning("Escribe el nombre del archivo a eliminar.")
+        else:
+            try:
+                r = httpx.delete(
+                    f"{url}/storage/v1/object/{bucket}/{nombre_eliminar}",
+                    headers=headers,
+                    timeout=15,
+                )
+                if r.status_code in (200, 204):
+                    st.success(f"✅ Archivo eliminado: **{nombre_eliminar}**")
+                    st.cache_data.clear()
+                else:
+                    st.error(f"Error al eliminar ({r.status_code}): {r.text[:200]}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("---")
+    st.info(
+        "💡 Recuerda: un archivo por mes. "
+        "Si el mes es acumulativo, elimina el anterior y sube el nuevo. "
+        "Usa 🔄 Actualizar datos en el sidebar después de cualquier cambio."
+    )
