@@ -429,9 +429,9 @@ def cargar_datos() -> pd.DataFrame:
     }
 
     # ── 1. Listar archivos en el bucket ───────────────────────────────────────
-    resp = httpx.get(
+    resp = httpx.post(
         f"{url}/storage/v1/object/list/{bucket}",
-        headers=headers,
+        headers={**headers, "Content-Type": "application/json"},
         json={"limit": 100, "offset": 0},
         timeout=30,
     )
