@@ -439,11 +439,7 @@ def cargar_datos() -> pd.DataFrame:
         st.error(f"No se pudo listar el bucket '{bucket}': {resp.text[:200]}")
         return pd.DataFrame()
 
-    respuesta_json = resp.json()
-    # Debug temporal
-    st.sidebar.write("DEBUG lista bucket:", respuesta_json[:3] if respuesta_json else "vacío")
-
-    archivos = [f["name"] for f in respuesta_json if f.get("name")]
+    archivos = [f["name"] for f in resp.json() if f.get("name")]
     if not archivos:
         st.warning(f"El bucket '{bucket}' está vacío. Sube los archivos TXT/CSV primero.")
         return pd.DataFrame()
